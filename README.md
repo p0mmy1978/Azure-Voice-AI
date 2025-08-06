@@ -7,6 +7,16 @@ This repository demonstrates how to build a **voice‑first virtual assistant** 
 3. **Azure AI Voice live* resource with deployed model (e.g. `gpt‑4o‑mini‑realtime‑preview`)  
 4. **Ngrok or Azure DevTunnels CLI** (for exposing local callbacks)
 
+   if new machine
+
+   sudo apt update && sudo apt upgrade -y
+sudo apt install -y wget apt-transport-https
+wget https://packages.microsoft.com/config/ubuntu/22.04/packages-microsoft-prod.deb -O packages-microsoft-prod.deb
+sudo dpkg -i packages-microsoft-prod.deb
+sudo apt update
+sudo apt install -y dotnet-sdk-8.0
+
+
 ## 🚀 Setup Instructions
 
 ### 1. Clone this repo:

@@ -18,7 +18,7 @@ cd Azure-Voice-AI
 {
   "AcsConnectionString": "<ACS_CONNECTION_STRING>",
   "AppBaseUrl": "<https://your-ngrok-or-devtunnel>",
-  "AzureVoiceLiveEndpoint": "wss://voice-sdk.<region>.cognitiveservices.azure.com/voice-agent/realtime?api-version=2025-05-01-preview&deploymentName=<your-deployment>&language=en-US",
+  "AzureVoiceLiveEndpoint": "https://(your-endpint-name).cognitiveservices.azure.com/',
   "AzureVoiceLiveApiKey": "<YOUR_VOICE_LIVE_API_KEY>",
   "VoiceLiveModel": "<your-model-name>",
   "SystemPrompt": "<optional‑system‑prompt>"

@@ -4,7 +4,7 @@ This repository demonstrates how to build a **voice‑first virtual assistant** 
 
 1. **Azure Subscription**  
 2. **Azure Communication Services** resource (with calling-enabled phone number)  
-3. **Azure AI Voice** or **Azure OpenAI** resource with deployed model (e.g. `gpt‑4o‑mini‑realtime‑preview`)  
+3. **Azure AI Voice live* resource with deployed model (e.g. `gpt‑4o‑mini‑realtime‑preview`)  
 4. **Ngrok or Azure DevTunnels CLI** (for exposing local callbacks)
 
 ## 🚀 Setup Instructions

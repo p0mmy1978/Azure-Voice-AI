@@ -2,6 +2,12 @@ using System.Net.WebSockets;
 using Azure.Communication.CallAutomation;
 using System.Text;
 using System.Text.Json;
+using Azure.Data.Tables;
+using Microsoft.Graph;
+using Microsoft.Graph.Models;
+using Microsoft.Graph.Models.ODataErrors;
+using Microsoft.Graph.Users.Item.SendMail;
+using Azure.Identity;
 
 namespace CallAutomation.AzureAI.VoiceLive
 {
@@ -10,48 +16,45 @@ namespace CallAutomation.AzureAI.VoiceLive
         private CancellationTokenSource m_cts;
         private AcsMediaStreamingHandler m_mediaStreaming;
         private string m_answerPromptSystemTemplate = "You are an AI assistant that helps people find information.";
-        private ClientWebSocket m_azureVoiceLiveWebsocket;
+        private ClientWebSocket m_azureVoiceLiveWebsocket = default!;
+        private IConfiguration m_configuration;
+        private GraphServiceClient m_graphClient = default!;
 
         public AzureVoiceLiveService(AcsMediaStreamingHandler mediaStreaming, IConfiguration configuration)
         {
             m_mediaStreaming = mediaStreaming;
             m_cts = new CancellationTokenSource();
+            m_configuration = configuration;
+            InitGraphClient();
             CreateAISessionAsync(configuration).GetAwaiter().GetResult();
+        }
+
+        private void InitGraphClient()
+        {
+            var tenantId = m_configuration["GraphTenantId"];
+            var clientId = m_configuration["GraphClientId"];
+            var clientSecret = m_configuration["GraphClientSecret"];
+
+            var clientSecretCredential = new ClientSecretCredential(tenantId, clientId, clientSecret);
+            m_graphClient = new GraphServiceClient(clientSecretCredential, new[] { "https://graph.microsoft.com/.default" });
         }
 
         private async Task CreateAISessionAsync(IConfiguration configuration)
         {
             var azureVoiceLiveApiKey = configuration.GetValue<string>("AzureVoiceLiveApiKey");
-            ArgumentNullException.ThrowIfNullOrEmpty(azureVoiceLiveApiKey);
-
             var azureVoiceLiveEndpoint = configuration.GetValue<string>("AzureVoiceLiveEndpoint");
-            ArgumentNullException.ThrowIfNullOrEmpty(azureVoiceLiveEndpoint);
-
             var voiceLiveModel = configuration.GetValue<string>("VoiceLiveModel");
-            ArgumentNullException.ThrowIfNullOrEmpty(voiceLiveModel);
-
             var systemPrompt = configuration.GetValue<string>("SystemPrompt") ?? m_answerPromptSystemTemplate;
-            ArgumentNullException.ThrowIfNullOrEmpty(systemPrompt);
 
-            // The URL to connect to
             var azureVoiceLiveWebsocketUrl = new Uri($"{azureVoiceLiveEndpoint.Replace("https", "wss")}/voice-agent/realtime?api-version=2025-05-01-preview&x-ms-client-request-id={Guid.NewGuid()}&model={voiceLiveModel}&api-key={azureVoiceLiveApiKey}");
 
-            // Create a new WebSocket client
             m_azureVoiceLiveWebsocket = new ClientWebSocket();
-
             Console.WriteLine($"Connecting to {azureVoiceLiveWebsocketUrl}...");
-
-            // Connect to the WebSocket server
             await m_azureVoiceLiveWebsocket.ConnectAsync(azureVoiceLiveWebsocketUrl, CancellationToken.None);
             Console.WriteLine("Connected successfully!");
 
-            // Listen to messages over websocket
             StartConversation();
-
-            // Update the session
             await UpdateSessionAsync();
-
-            //Start Response from AI
             await StartResponseAsync();
         }
 
@@ -62,9 +65,11 @@ namespace CallAutomation.AzureAI.VoiceLive
                 type = "session.update",
                 session = new
                 {
-                    instructions = "You are the after-hours voice assistant for poms.tech. " +
-                                   "When you first answer the call, always say 'Welcome to poms.tech after hours message service, can I take a message for someone?' " +
-                                   "Always call a function if one is available.",
+                    instructions = string.Join(" ",
+                        "You are the after-hours voice assistant for poms.tech.",
+                        "Start with: 'Welcome to poms.tech after hours message service, can I take a message for someone?'",
+                        "Listen for the person's name, then the message.",
+                        "Use the send_message function to send the message to the correct person."),
                     turn_detection = new
                     {
                         type = "azure_semantic_vad",
@@ -85,64 +90,48 @@ namespace CallAutomation.AzureAI.VoiceLive
                     {
                         new {
                             type = "function",
-                            name = "end_call",
-                            description = "Ends the call when the user says goodbye or finishes speaking.",
+                            name = "send_message",
+                            description = "Send a message to a staff member.",
                             parameters = new {
                                 type = "object",
                                 properties = new {
-                                    done = new {
-                                        type = "boolean",
-                                        description = "If true, hang up the call"
-                                    }
+                                    name = new { type = "string", description = "The name of the person to send the message to" },
+                                    message = new { type = "string", description = "The message to send" }
                                 },
-                                required = new[] { "done" }
+                                required = new[] { "name", "message" }
                             }
                         }
-                    },
+                    }
                 }
             };
 
-            // Convert object to JSON string with indentation
-            string sessionUpdate = JsonSerializer.Serialize(jsonObject, new JsonSerializerOptions { WriteIndented = true });
+            var sessionUpdate = JsonSerializer.Serialize(jsonObject, new JsonSerializerOptions { WriteIndented = true });
             Console.WriteLine($"SessionUpdate: {sessionUpdate}");
             await SendMessageAsync(sessionUpdate, CancellationToken.None);
         }
 
         private async Task StartResponseAsync()
         {
-            var jsonObject = new
-            {
-                type = "response.create"
-            };
+            var jsonObject = new { type = "response.create" };
             var message = JsonSerializer.Serialize(jsonObject, new JsonSerializerOptions { WriteIndented = true });
             await SendMessageAsync(message, CancellationToken.None);
         }
 
-        // Method to send messages to the WebSocket server
         async Task SendMessageAsync(string message, CancellationToken cancellationToken)
         {
-            //Console.WriteLine($"Sending Message: {message}");
+            if (m_azureVoiceLiveWebsocket?.State != WebSocketState.Open) return;
 
-            if (m_azureVoiceLiveWebsocket != null)
-            {
-                if (m_azureVoiceLiveWebsocket.State != WebSocketState.Open)
-                    return;
-
-                byte[] messageBytes = Encoding.UTF8.GetBytes(message);
-                await m_azureVoiceLiveWebsocket.SendAsync(
-                    new ArraySegment<byte>(messageBytes),
-                    WebSocketMessageType.Text,
-                    true,
-                    cancellationToken);
-
-                //Console.WriteLine($"Sent: {message}");
-            }
+            byte[] messageBytes = Encoding.UTF8.GetBytes(message);
+            await m_azureVoiceLiveWebsocket.SendAsync(
+                new ArraySegment<byte>(messageBytes),
+                WebSocketMessageType.Text,
+                true,
+                cancellationToken);
         }
 
-        // Method to receive messages from the WebSocket server
         async Task ReceiveMessagesAsync(CancellationToken cancellationToken)
         {
-            byte[] buffer = new byte[1024 * 8]; // 8KB buffer
+            byte[] buffer = new byte[1024 * 8];
 
             try
             {
@@ -151,59 +140,123 @@ namespace CallAutomation.AzureAI.VoiceLive
                     var receiveBuffer = new ArraySegment<byte>(buffer);
                     StringBuilder messageBuilder = new StringBuilder();
 
-                    WebSocketReceiveResult result = null;
-
+                    WebSocketReceiveResult result;
                     do
                     {
                         result = await m_azureVoiceLiveWebsocket.ReceiveAsync(receiveBuffer, cancellationToken);
                         messageBuilder.Append(Encoding.UTF8.GetString(buffer, 0, result.Count));
-
-                        if (result.MessageType == WebSocketMessageType.Close)
-                        {
-                            await m_azureVoiceLiveWebsocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Closing", CancellationToken.None);
-                            return;
-                        }
-
-                    } while (!result.EndOfMessage); // Ensure full message is received
+                    }
+                    while (!result.EndOfMessage);
 
                     string receivedMessage = messageBuilder.ToString();
                     Console.WriteLine($"Received: {receivedMessage}");
 
-                    var data = JsonSerializer.Deserialize<Dictionary<string, object>>(receivedMessage);
+                    var jsonDoc = JsonDocument.Parse(receivedMessage);
+                    var root = jsonDoc.RootElement;
 
-                    if (data != null)
+                    if (root.TryGetProperty("type", out var typeElement))
                     {
-                        if (data["type"].ToString() == "response.audio.delta")
+                        var messageType = typeElement.GetString();
+
+                        if (messageType == "response.audio.delta")
                         {
-                            var jsonString = OutStreamingData.GetAudioDataForOutbound(Convert.FromBase64String(data["delta"].ToString()));
+                            var delta = root.GetProperty("delta").GetString();
+                            var jsonString = OutStreamingData.GetAudioDataForOutbound(Convert.FromBase64String(delta));
                             await m_mediaStreaming.SendMessageAsync(jsonString);
                         }
-                        else if (data["type"].ToString() == "input_audio_buffer.speech_started")
+                        else if (messageType == "input_audio_buffer.speech_started")
                         {
-                            Console.WriteLine($"  -- Voice activity detection started");
-                            // Barge-in, send stop audio
+                            Console.WriteLine("-- Voice activity detection started");
                             var jsonString = OutStreamingData.GetStopAudioForOutbound();
                             await m_mediaStreaming.SendMessageAsync(jsonString);
                         }
-                        else if (data["type"].ToString() == "response.function_call_arguments.done")
+                        else if (messageType == "response.function_call" || messageType == "response.function_call_arguments.done")
                         {
-                            Console.WriteLine("End call function triggered - closing WebSocket connection");
-                            await Close();
+                            Console.WriteLine("🔷 Detected function_call type response");
+                            var functionName = root.GetProperty("name").GetString();
+                            var args = root.GetProperty("arguments").ToString();
+                            Console.WriteLine($"🔶 Function name: {functionName}");
+                            Console.WriteLine($"🔶 Raw args: {args}");
+
+                            if (functionName == "send_message")
+                            {
+                                Console.WriteLine($"🟢 Raw function args: {args}");
+
+                                try
+                                {
+                                    var parsed = JsonDocument.Parse(args);
+                                    var name = parsed.RootElement.GetProperty("name").GetString();
+                                    var message = parsed.RootElement.GetProperty("message").GetString();
+
+                                    Console.WriteLine($"🟡 Parsed: name={name}, message={message}");
+                                    await SendEmailToUserAsync(name, message);
+                                }
+                                catch (Exception ex)
+                                {
+                                    Console.WriteLine($"🔴 Failed to parse function args: {ex}");
+                                }
+                            }
                         }
-                    }
-                    else
-                    {
-                        Console.WriteLine($"Received message is null or empty.");
                     }
                 }
             }
-            catch (OperationCanceledException)
+            catch (Exception ex)
             {
-                // Operation was canceled, which is fine
+                Console.WriteLine($"Receive error: {ex.Message}");
+            }
+        }
+
+        private async Task SendEmailToUserAsync(string name, string message)
+        {
+            try
+            {
+                Console.WriteLine("📬 Begin SendEmailToUserAsync...");
+
+                var tableServiceUri = new Uri(m_configuration["StorageUri"]);
+                Console.WriteLine($"🔎 Storage URI: {tableServiceUri}");
+
+                var tableClient = new TableClient(
+                    tableServiceUri,
+                    m_configuration["TableName"],
+                    new TableSharedKeyCredential(
+                        m_configuration["StorageAccountName"],
+                        m_configuration["StorageAccountKey"])
+                );
+
+                var rowKey = name.ToLower().Replace(" ", "");
+                Console.WriteLine($"🔍 Looking up Azure Table Storage with RowKey: {rowKey}");
+
+                var entity = await tableClient.GetEntityAsync<TableEntity>("staff", rowKey);
+                var email = entity.Value["email"].ToString();
+                Console.WriteLine($"📧 Email address resolved: {email}");
+
+                var mail = new Message
+                {
+                    Subject = $"After-hours message for {name}",
+                    Body = new ItemBody
+                    {
+                        ContentType = BodyType.Text,
+                        Content = message
+                    },
+                    ToRecipients = new List<Recipient>
+                    {
+                        new Recipient { EmailAddress = new EmailAddress { Address = email } }
+                    }
+                };
+
+                var requestBody = new SendMailPostRequestBody
+                {
+                    Message = mail,
+                    SaveToSentItems = true
+                };
+
+                Console.WriteLine("📤 Sending mail via Graph API...");
+                await m_graphClient.Users[m_configuration["GraphSenderUPN"]].SendMail.PostAsync(requestBody);
+                Console.WriteLine($"✅ Message sent to {name} at {email}");
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error while receiving: {ex.Message}");
+                Console.WriteLine($"❌ Failed to send email: {ex}");
             }
         }
 
@@ -225,7 +278,6 @@ namespace CallAutomation.AzureAI.VoiceLive
             await SendMessageAsync(message, CancellationToken.None);
         }
 
-
         public async Task Close()
         {
             m_cts.Cancel();
@@ -237,4 +289,3 @@ namespace CallAutomation.AzureAI.VoiceLive
         }
     }
 }
-

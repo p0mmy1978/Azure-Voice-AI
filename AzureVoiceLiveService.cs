@@ -69,7 +69,9 @@ namespace CallAutomation.AzureAI.VoiceLive
                         "You are the after-hours voice assistant for poms.tech.",
                         "Start with: 'Welcome to poms.tech after hours message service, can I take a message for someone?'",
                         "Listen for the person's name, then the message.",
-                        "Use the send_message function to send the message to the correct person."),
+                        "Use the send_message function to send the message to the correct person.",
+                        "After sending the message, say 'I have sent your message to [name]. Is there anything else I can help you with?'"
+                    ),
                     turn_detection = new
                     {
                         type = "azure_semantic_vad",
@@ -190,6 +192,31 @@ namespace CallAutomation.AzureAI.VoiceLive
 
                                     Console.WriteLine($"🟡 Parsed: name={name}, message={message}");
                                     await SendEmailToUserAsync(name, message);
+
+                                    // Immediately respond to the user after sending the email
+                                    var confirmationMessage = new
+                                    {
+                                        type = "response.create",
+                                        messages = new object[]
+                                        {
+                                            new
+                                            {
+                                                type = "message",
+                                                role = "assistant",
+                                                content = new object[]
+                                                {
+                                                    new
+                                                    {
+                                                        type = "text",
+                                                        text = $"I have sent your message to {name}. Is there anything else I can help you with?"
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    };
+
+                                    var jsonConfirmation = JsonSerializer.Serialize(confirmationMessage, new JsonSerializerOptions { WriteIndented = true });
+                                    await SendMessageAsync(jsonConfirmation, cancellationToken);
                                 }
                                 catch (Exception ex)
                                 {

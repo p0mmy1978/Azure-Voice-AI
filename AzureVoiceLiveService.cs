@@ -8,6 +8,8 @@ using Microsoft.Graph.Models;
 using Microsoft.Graph.Models.ODataErrors;
 using Microsoft.Graph.Users.Item.SendMail;
 using Azure.Identity;
+using CallAutomation.AzureAI.VoiceLive.Models;
+using CallAutomation.AzureAI.VoiceLive.Services.Interfaces;
 
 namespace CallAutomation.AzureAI.VoiceLive
 {
@@ -22,22 +24,30 @@ namespace CallAutomation.AzureAI.VoiceLive
         private readonly ILogger<AzureVoiceLiveService> _logger;
         private bool m_isEndingCall = false;
         private string m_callerId;
-        private CallAutomationClient m_callAutomationClient; // For hanging up calls
-        private Dictionary<string, string> m_activeCallConnections; // Track active call connections
-        private bool m_hasHungUp = false; // Prevent multiple hangups
-        private DateTime m_goodbyeStartTime; // Track when goodbye message started
-        private bool m_goodbyeMessageStarted = false; // Track if goodbye message has started
+        private CallAutomationClient m_callAutomationClient;
+        private Dictionary<string, string> m_activeCallConnections;
+        private bool m_hasHungUp = false;
+        private DateTime m_goodbyeStartTime;
+        private bool m_goodbyeMessageStarted = false;
+        private readonly IStaffLookupService _staffLookupService;
 
-        // Constructor to accept CallAutomationClient and connection tracking
-        public AzureVoiceLiveService(AcsMediaStreamingHandler mediaStreaming, IConfiguration configuration, ILogger<AzureVoiceLiveService> logger, string callerId, CallAutomationClient callAutomationClient, Dictionary<string, string> activeCallConnections)
+        public AzureVoiceLiveService(
+            AcsMediaStreamingHandler mediaStreaming, 
+            IConfiguration configuration, 
+            ILogger<AzureVoiceLiveService> logger, 
+            string callerId, 
+            CallAutomationClient callAutomationClient, 
+            Dictionary<string, string> activeCallConnections,
+            IStaffLookupService staffLookupService)
         {
             m_mediaStreaming = mediaStreaming;
             m_cts = new CancellationTokenSource();
             m_configuration = configuration;
             _logger = logger;
             m_callerId = callerId;
-            m_callAutomationClient = callAutomationClient; // Store the call automation client
-            m_activeCallConnections = activeCallConnections; // Store active call connections
+            m_callAutomationClient = callAutomationClient;
+            m_activeCallConnections = activeCallConnections;
+            _staffLookupService = staffLookupService;
             
             _logger.LogInformation($"🎯 AzureVoiceLiveService initialized with Caller ID: {m_callerId}");
             
@@ -71,7 +81,6 @@ namespace CallAutomation.AzureAI.VoiceLive
 
             StartConversation();
             await UpdateSessionAsync();
-            // Send initial greeting only once after session update
             await StartResponseAsync();
         }
 
@@ -245,7 +254,6 @@ namespace CallAutomation.AzureAI.VoiceLive
                         }
                         else if (messageType == "response.output_item.added")
                         {
-                            // NEW: Detect when goodbye message starts
                             if (m_isEndingCall && !m_goodbyeMessageStarted)
                             {
                                 m_goodbyeMessageStarted = true;
@@ -260,7 +268,6 @@ namespace CallAutomation.AzureAI.VoiceLive
                             {
                                 _logger.LogInformation("🔚 Call ending detected - AI response completed");
                                 
-                                // Calculate how long to wait based on goodbye message timing
                                 var additionalDelay = CalculateGoodbyeDelay();
                                 _logger.LogInformation($"⏱️ Waiting {additionalDelay}ms for goodbye message to complete");
                                 
@@ -278,7 +285,6 @@ namespace CallAutomation.AzureAI.VoiceLive
                             {
                                 _logger.LogInformation("🔚 Call ending detected - Audio generation completed");
                                 
-                                // Calculate how long to wait for audio playback to finish
                                 var additionalDelay = CalculateGoodbyeDelay();
                                 _logger.LogInformation($"⏱️ Waiting {additionalDelay}ms for audio playback to complete");
                                 
@@ -298,35 +304,26 @@ namespace CallAutomation.AzureAI.VoiceLive
             }
         }
 
-        // NEW: Calculate appropriate delay for goodbye message
         private int CalculateGoodbyeDelay()
         {
             if (m_goodbyeMessageStarted)
             {
-                // Calculate elapsed time since goodbye started
                 var elapsedSinceGoodbye = DateTime.Now - m_goodbyeStartTime;
-                
-                // Typical goodbye message: "Thanks for calling poms.tech, have a great day!"
-                // Estimate: ~4 seconds to say this at normal pace + buffer for audio transmission/processing
                 var estimatedGoodbyeDuration = TimeSpan.FromSeconds(5);
-                
                 var remainingTime = estimatedGoodbyeDuration - elapsedSinceGoodbye;
                 
                 if (remainingTime.TotalMilliseconds > 0)
                 {
-                    // Add extra buffer for audio transmission and processing delays
                     return (int)remainingTime.TotalMilliseconds + 1500;
                 }
                 else
                 {
-                    // If somehow we're already past the estimated time, add a small buffer
                     return 1000;
                 }
             }
             else
             {
-                // Fallback if we couldn't track timing - use longer delay
-                return 6000; // 6 seconds should be plenty for the goodbye message
+                return 6000;
             }
         }
 
@@ -340,108 +337,17 @@ namespace CallAutomation.AzureAI.VoiceLive
                 var department = parsed.RootElement.TryGetProperty("department", out var deptElement) ? 
                     deptElement.GetString() : null;
                 
-                var normalized = (name ?? string.Empty).Trim().ToLowerInvariant().Replace(" ", "");
+                // Use the new service instead of inline logic
+                var result = await _staffLookupService.CheckStaffExistsAsync(name!, department);
                 
-                var tableServiceUri = new Uri(m_configuration["StorageUri"]);
-                var tableClient = new TableClient(
-                    tableServiceUri,
-                    m_configuration["TableName"],
-                    new TableSharedKeyCredential(
-                        m_configuration["StorageAccountName"],
-                        m_configuration["StorageAccountKey"]));
-
-                string functionResult;
-                
-                // If department is provided, try exact match first
-                if (!string.IsNullOrWhiteSpace(department))
+                string functionResult = result.Status switch
                 {
-                    var normalizedDept = department.Trim().ToLowerInvariant();
-                    var exactRowKey = $"{normalized}_{normalizedDept}";
-                    
-                    _logger.LogInformation($"🔍 [check_staff_exists] Looking up with department: {exactRowKey}");
-                    var exactResult = await tableClient.GetEntityIfExistsAsync<TableEntity>("staff", exactRowKey);
-                    
-                    if (exactResult.HasValue && exactResult.Value != null)
-                    {
-                        var emailObj = exactResult.Value.ContainsKey("email") ? exactResult.Value["email"] : null;
-                        var email = emailObj?.ToString()?.Trim();
-                        bool validEmail = !string.IsNullOrWhiteSpace(email) && email.Contains("@");
-                        
-                        if (validEmail)
-                        {
-                            _logger.LogInformation($"✅ Staff authorized: {name} in {department}, email: {email}");
-                            functionResult = "authorized";
-                        }
-                        else
-                        {
-                            _logger.LogWarning($"❌ Staff found but invalid email: {name} in {department}");
-                            functionResult = "not_authorized";
-                        }
-                    }
-                    else
-                    {
-                        _logger.LogWarning($"❌ Staff NOT found: {name} in {department}");
-                        functionResult = "not_authorized";
-                    }
-                }
-                else
-                {
-                    // No department provided - search for all matches
-                    _logger.LogInformation($"🔍 [check_staff_exists] Searching for all matches of: {normalized}");
-                    
-                    // Query all entities that start with the normalized name
-                    var query = tableClient.QueryAsync<TableEntity>(
-                        filter: $"PartitionKey eq 'staff' and RowKey ge '{normalized}' and RowKey lt '{normalized}~'",
-                        maxPerPage: 10);
-                    
-                    var matches = new List<TableEntity>();
-                    await foreach (var entity in query)
-                    {
-                        // Check if RowKey starts with our normalized name
-                        if (entity.RowKey.StartsWith(normalized))
-                        {
-                            matches.Add(entity);
-                        }
-                    }
-                    
-                    _logger.LogInformation($"🔍 Found {matches.Count} potential matches");
-                    
-                    if (matches.Count == 0)
-                    {
-                        _logger.LogWarning($"❌ No staff found matching: {name}");
-                        functionResult = "not_authorized";
-                    }
-                    else if (matches.Count == 1)
-                    {
-                        var match = matches[0];
-                        var emailObj = match.ContainsKey("email") ? match["email"] : null;
-                        var email = emailObj?.ToString()?.Trim();
-                        bool validEmail = !string.IsNullOrWhiteSpace(email) && email.Contains("@");
-                        
-                        if (validEmail)
-                        {
-                            _logger.LogInformation($"✅ Single match found and authorized: {name}");
-                            functionResult = "authorized";
-                        }
-                        else
-                        {
-                            _logger.LogWarning($"❌ Single match found but invalid email: {name}");
-                            functionResult = "not_authorized";
-                        }
-                    }
-                    else
-                    {
-                        // Multiple matches found - need clarification
-                        var departments = matches.Where(m => m.ContainsKey("Department"))
-                            .Select(m => m["Department"]?.ToString())
-                            .Where(d => !string.IsNullOrWhiteSpace(d))
-                            .Distinct()
-                            .ToList();
-                        
-                        _logger.LogInformation($"🟡 Multiple matches found for {name}. Departments: {string.Join(", ", departments)}");
-                        functionResult = "multiple_found";
-                    }
-                }
+                    StaffLookupStatus.Authorized => "authorized",
+                    StaffLookupStatus.NotAuthorized => "not_authorized", 
+                    StaffLookupStatus.MultipleFound => "multiple_found",
+                    StaffLookupStatus.NotFound => "not_authorized",
+                    _ => "not_authorized"
+                };
 
                 // Send function response back to AI
                 var functionResponse = new
@@ -483,128 +389,24 @@ namespace CallAutomation.AzureAI.VoiceLive
 
                 _logger.LogInformation($"🟡 Parsed: name={name}, message={message}, department={department}");
 
-                // Get staff email using the same logic as check_staff_exists
-                var tableServiceUri = new Uri(m_configuration["StorageUri"]);
-                var tableClient = new TableClient(
-                    tableServiceUri,
-                    m_configuration["TableName"],
-                    new TableSharedKeyCredential(
-                        m_configuration["StorageAccountName"],
-                        m_configuration["StorageAccountKey"]));
-                
-                var normalized = (name ?? string.Empty).Trim().ToLowerInvariant().Replace(" ", "");
-                string rowKey;
-                TableEntity? staffEntity = null;
-                
-                // Use the same logic as check_staff_exists
-                if (!string.IsNullOrWhiteSpace(department))
-                {
-                    var normalizedDept = department.Trim().ToLowerInvariant();
-                    rowKey = $"{normalized}_{normalizedDept}";
-                    _logger.LogInformation($"🔍 [send_message] Looking up with department: {rowKey}");
-                    
-                    var exactResult = await tableClient.GetEntityIfExistsAsync<TableEntity>("staff", rowKey);
-                    if (exactResult.HasValue && exactResult.Value != null)
-                    {
-                        staffEntity = exactResult.Value;
-                    }
-                }
-                else
-                {
-                    // If no department provided, try to find a unique match
-                    _logger.LogInformation($"🔍 [send_message] No department provided, searching for matches of: {normalized}");
-                    
-                    var query = tableClient.QueryAsync<TableEntity>(
-                        filter: $"PartitionKey eq 'staff' and RowKey ge '{normalized}' and RowKey lt '{normalized}~'",
-                        maxPerPage: 10);
-                    
-                    var matches = new List<TableEntity>();
-                    await foreach (var entity in query)
-                    {
-                        if (entity.RowKey.StartsWith(normalized))
-                        {
-                            matches.Add(entity);
-                        }
-                    }
-                    
-                    if (matches.Count == 1)
-                    {
-                        staffEntity = matches[0];
-                        rowKey = matches[0].RowKey;
-                        _logger.LogInformation($"🔍 [send_message] Single match found: {rowKey}");
-                    }
-                    else if (matches.Count > 1)
-                    {
-                        _logger.LogWarning($"🟡 [send_message] Multiple matches found for {name}, cannot proceed without department");
-                        var functionResponse = new
-                        {
-                            type = "conversation.item.create",
-                            item = new
-                            {
-                                type = "function_call_output",
-                                call_id = callId,
-                                output = "failed - multiple matches found, department required"
-                            }
-                        };
-                        var jsonResponse = JsonSerializer.Serialize(functionResponse, new JsonSerializerOptions { WriteIndented = true });
-                        _logger.LogInformation($"[DEBUG] Sending function response to AI: {jsonResponse}");
-                        await SendMessageAsync(jsonResponse, cancellationToken);
-
-                        // Trigger AI response
-                        var createResponse = new { type = "response.create" };
-                        var jsonCreateResponse = JsonSerializer.Serialize(createResponse, new JsonSerializerOptions { WriteIndented = true });
-                        await SendMessageAsync(jsonCreateResponse, cancellationToken);
-                        return;
-                    }
-                    else
-                    {
-                        _logger.LogWarning($"❌ [send_message] No matches found for {name}");
-                        var functionResponse = new
-                        {
-                            type = "conversation.item.create",
-                            item = new
-                            {
-                                type = "function_call_output",
-                                call_id = callId,
-                                output = "failed - staff not found"
-                            }
-                        };
-                        var jsonResponse = JsonSerializer.Serialize(functionResponse, new JsonSerializerOptions { WriteIndented = true });
-                        _logger.LogInformation($"[DEBUG] Sending function response to AI: {jsonResponse}");
-                        await SendMessageAsync(jsonResponse, cancellationToken);
-
-                        // Trigger AI response
-                        var createResponse = new { type = "response.create" };
-                        var jsonCreateResponse = JsonSerializer.Serialize(createResponse, new JsonSerializerOptions { WriteIndented = true });
-                        await SendMessageAsync(jsonCreateResponse, cancellationToken);
-                        return;
-                    }
-                }
+                // Use the new service to get email
+                var email = await _staffLookupService.GetStaffEmailAsync(name!, department);
                 
                 string functionResult;
-                if (staffEntity != null && staffEntity.ContainsKey("email"))
+                if (!string.IsNullOrWhiteSpace(email))
                 {
-                    var email = staffEntity["email"]?.ToString()?.Trim();
-                    if (!string.IsNullOrWhiteSpace(email) && email.Contains("@"))
-                    {
-                        _logger.LogInformation($"✅ Sending email to: {name}, email: {email}");
-                        await SendEmailToUserAsync(name, email, message);
-                        functionResult = "success";
-                    }
-                    else
-                    {
-                        _logger.LogWarning($"❌ No valid email for: {name}");
-                        functionResult = "failed - no valid email";
-                    }
+                    _logger.LogInformation($"✅ Sending email to: {name}, email: {email}");
+                    await SendEmailToUserAsync(name, email, message);
+                    functionResult = "success";
                 }
                 else
                 {
-                    _logger.LogWarning($"❌ Staff not found for message sending: {name}");
-                    functionResult = "failed - staff not found";
+                    _logger.LogWarning($"❌ No valid email found for: {name}");
+                    functionResult = "failed - staff not found or invalid email";
                 }
 
                 // Send function response back to AI
-                var finalResponse = new
+                var functionResponse = new
                 {
                     type = "conversation.item.create",
                     item = new
@@ -615,14 +417,14 @@ namespace CallAutomation.AzureAI.VoiceLive
                     }
                 };
 
-                var finalJsonResponse = JsonSerializer.Serialize(finalResponse, new JsonSerializerOptions { WriteIndented = true });
-                _logger.LogInformation($"[DEBUG] Sending function response to AI: {finalJsonResponse}");
-                await SendMessageAsync(finalJsonResponse, cancellationToken);
+                var jsonResponse = JsonSerializer.Serialize(functionResponse, new JsonSerializerOptions { WriteIndented = true });
+                _logger.LogInformation($"[DEBUG] Sending function response to AI: {jsonResponse}");
+                await SendMessageAsync(jsonResponse, cancellationToken);
 
                 // Trigger AI response
-                var createResponse2 = new { type = "response.create" };
-                var jsonCreateResponse2 = JsonSerializer.Serialize(createResponse2, new JsonSerializerOptions { WriteIndented = true });
-                await SendMessageAsync(jsonCreateResponse2, cancellationToken);
+                var createResponse = new { type = "response.create" };
+                var jsonCreateResponse = JsonSerializer.Serialize(createResponse, new JsonSerializerOptions { WriteIndented = true });
+                await SendMessageAsync(jsonCreateResponse, cancellationToken);
             }
             catch (Exception ex)
             {
@@ -630,15 +432,12 @@ namespace CallAutomation.AzureAI.VoiceLive
             }
         }
 
-        // FIXED: HandleEndCall - improved timing management
         private async Task HandleEndCall(string callId, CancellationToken cancellationToken)
         {
             _logger.LogInformation("🟣 end_call function triggered. Setting call ending flag and preparing goodbye message.");
             
-            // Set the flag to indicate we're ending the call
             m_isEndingCall = true;
             
-            // Send function response back to AI
             var functionResponse = new
             {
                 type = "conversation.item.create",
@@ -654,7 +453,6 @@ namespace CallAutomation.AzureAI.VoiceLive
             _logger.LogInformation($"[DEBUG] Sending function response to AI: {jsonResponse}");
             await SendMessageAsync(jsonResponse, cancellationToken);
 
-            // Trigger final AI response (goodbye message)
             var createResponse = new { type = "response.create" };
             var jsonCreateResponse = JsonSerializer.Serialize(createResponse, new JsonSerializerOptions { WriteIndented = true });
             _logger.LogInformation($"[DEBUG] Triggering AI goodbye response: {jsonCreateResponse}");
@@ -663,15 +461,13 @@ namespace CallAutomation.AzureAI.VoiceLive
             _logger.LogInformation("🟣 End call function completed. Goodbye message will be spoken, then call will be hung up after appropriate delay.");
         }
 
-        // Method to hang up the actual ACS call with guard to prevent multiple hangups
         private async Task HangUpAcsCall()
         {
-            if (m_hasHungUp) return; // Prevent multiple hangups
+            if (m_hasHungUp) return;
             m_hasHungUp = true;
             
             try
             {
-                // Find the call connection ID for this session
                 var callConnectionId = m_activeCallConnections.Values.FirstOrDefault();
                 
                 if (!string.IsNullOrEmpty(callConnectionId))
@@ -694,20 +490,15 @@ namespace CallAutomation.AzureAI.VoiceLive
             }
         }
 
-        // Enhanced email format with caller ID and professional formatting
         private async Task SendEmailToUserAsync(string name, string email, string message)
         {
             try
             {
                 _logger.LogInformation($"📬 Begin SendEmailToUserAsync for {name} <{message}> from caller: {m_callerId}");
                 
-                // Format the timestamp
                 var timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
-                
-                // Clean and format caller number to E.164 format
                 var formattedCallerNumber = FormatCallerNumber(m_callerId);
                 
-                // Create the formatted message body using the cleaned caller ID
                 var formattedMessage = $@"You have received a new after-hours message:
 
 Time: {timestamp}
@@ -744,7 +535,6 @@ Message: {message}";
             }
         }
 
-        // Helper method to format caller number to E.164 format
         private string FormatCallerNumber(string rawCallerNumber)
         {
             if (string.IsNullOrWhiteSpace(rawCallerNumber))
@@ -756,35 +546,28 @@ Message: {message}";
             {
                 _logger.LogInformation($"🔍 Raw caller number received: '{rawCallerNumber}'");
                 
-                // Remove any non-digit characters except + 
                 var digitsOnly = new string(rawCallerNumber.Where(c => char.IsDigit(c)).ToArray());
                 
                 _logger.LogInformation($"🔍 Digits extracted: '{digitsOnly}'");
                 
-                // If we have digits, format as E.164
                 if (!string.IsNullOrEmpty(digitsOnly))
                 {
-                    // Look for Australian number pattern (starting with 61)
                     if (digitsOnly.StartsWith("461") && digitsOnly.Length >= 12)
                     {
-                        // Remove the leading "4" prefix and format the Australian number
-                        var cleanNumber = digitsOnly.Substring(1); // Remove the "4"
+                        var cleanNumber = digitsOnly.Substring(1);
                         _logger.LogInformation($"🔍 Removed ACS prefix '4', clean number: '{cleanNumber}'");
                         return $"+{cleanNumber}";
                     }
                     else if (digitsOnly.StartsWith("61") && digitsOnly.Length >= 11)
                     {
-                        // Already a proper Australian number
                         return $"+{digitsOnly}";
                     }
                     else if (digitsOnly.Length >= 10)
                     {
-                        // Generic international number
                         return $"+{digitsOnly}";
                     }
                 }
                 
-                // Fallback: return original if we can't parse it
                 _logger.LogWarning($"Could not format caller number: '{rawCallerNumber}'");
                 return rawCallerNumber;
             }

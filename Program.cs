@@ -7,7 +7,8 @@ using Microsoft.AspNetCore.Mvc;
 using Newtonsoft.Json;
 using System.ComponentModel.DataAnnotations;
 using CallAutomation.AzureAI.VoiceLive;
-
+using CallAutomation.AzureAI.VoiceLive.Services.Interfaces;
+using CallAutomation.AzureAI.VoiceLive.Services;
 
 // Configure Serilog
 Log.Logger = new LoggerConfiguration()
@@ -15,11 +16,8 @@ Log.Logger = new LoggerConfiguration()
     .WriteTo.File("logs/app-log.txt", rollingInterval: RollingInterval.Day)
     .CreateLogger();
 
-
 var builder = WebApplication.CreateBuilder(args);
 builder.Host.UseSerilog();
-// Register AcsMediaStreamingHandler for DI
-// builder.Services.AddTransient<AcsMediaStreamingHandler>();
 
 //Get ACS Connection String from appsettings.json
 var acsConnectionString = builder.Configuration.GetValue<string>("AcsConnectionString");
@@ -27,10 +25,21 @@ ArgumentNullException.ThrowIfNullOrEmpty(acsConnectionString);
 
 //Call Automation Client
 var client = new CallAutomationClient(acsConnectionString);
+
+// Register new services for dependency injection
+builder.Services.AddScoped<IStaffLookupService, StaffLookupService>();
+
+// You'll add more services here as we extract them:
+// builder.Services.AddScoped<IEmailService, EmailService>();
+// builder.Services.AddScoped<ICallManagementService, CallManagementService>();
+// builder.Services.AddScoped<IFunctionCallProcessor, FunctionCallProcessor>();
+// builder.Services.AddScoped<IAudioStreamProcessor, AudioStreamProcessor>();
+// builder.Services.AddScoped<IVoiceSessionManager, VoiceSessionManager>();
+
 var app = builder.Build();
 var appBaseUrl = builder.Configuration["AppBaseUrl"]?.TrimEnd('/');
 
-// NEW: Dictionary to track active call connections for hangup
+// Dictionary to track active call connections for hangup
 var activeCallConnections = new Dictionary<string, string>(); // contextId -> callConnectionId
 
 if (string.IsNullOrEmpty(appBaseUrl))
@@ -71,7 +80,7 @@ app.MapPost("/api/incomingCall", async (
         var callbackUri = new Uri(new Uri(appBaseUrl), $"/api/callbacks/{Guid.NewGuid()}?callerId={callerId}");
         logger.LogInformation($"Callback Url: {callbackUri}");
         
-        // MODIFIED: Include callerId in WebSocket URL
+        // Include callerId in WebSocket URL
         var websocketUri = appBaseUrl.Replace("https", "wss") + $"/ws?callerId={callerId}";
         logger.LogInformation($"WebSocket Url: {websocketUri}");
 
@@ -95,7 +104,7 @@ app.MapPost("/api/incomingCall", async (
     return Results.Ok();
 });
 
-// MODIFIED: api to handle call back events - now captures CallConnectionId
+// api to handle call back events - captures CallConnectionId
 app.MapPost("/api/callbacks/{contextId}", async (
     [FromBody] CloudEvent[] cloudEvents,
     [FromRoute] string contextId,
@@ -107,7 +116,7 @@ app.MapPost("/api/callbacks/{contextId}", async (
         CallAutomationEventBase @event = CallAutomationEventParser.Parse(cloudEvent);
         logger.LogInformation($"Event received: {JsonConvert.SerializeObject(@event, Formatting.Indented)}");
         
-        // NEW: Capture CallConnectionId for hangup later
+        // Capture CallConnectionId for hangup later
         if (@event is CallConnected callConnectedEvent)
         {
             activeCallConnections[contextId] = callConnectedEvent.CallConnectionId;
@@ -125,7 +134,7 @@ app.MapPost("/api/callbacks/{contextId}", async (
 
 app.UseWebSockets();
 
-// MODIFIED: WebSocket handler to pass CallAutomationClient and connection tracking
+// WebSocket handler with dependency injection support
 app.Use(async (context, next) =>
 {
     if (context.Request.Path == "/ws")
@@ -144,10 +153,21 @@ app.Use(async (context, next) =>
                 var loggerFactory = app.Services.GetRequiredService<ILoggerFactory>();
                 var aiLogger = loggerFactory.CreateLogger<AzureVoiceLiveService>();
                 
-                // MODIFIED: Pass CallAutomationClient and connection tracking to AcsMediaStreamingHandler
-                var mediaService = new AcsMediaStreamingHandler(webSocket, builder.Configuration, aiLogger, callerId, client, activeCallConnections);
+                // Create a service scope for dependency injection
+                using var scope = app.Services.CreateScope();
+                var serviceProvider = scope.ServiceProvider;
+                
+                // Pass all required dependencies including service provider
+                var mediaService = new AcsMediaStreamingHandler(
+                    webSocket, 
+                    builder.Configuration, 
+                    aiLogger, 
+                    callerId, 
+                    client, 
+                    activeCallConnections,
+                    serviceProvider);
 
-                // Set the single WebSocket connection
+                // Process the WebSocket connection
                 await mediaService.ProcessWebSocketAsync();
             }
             catch (Exception ex)
@@ -165,18 +185,5 @@ app.Use(async (context, next) =>
         await next(context);
     }
 });
-
-
-// Example: How to get an instance and use it (logs will go to logs/app-log.txt)
-// Example: If you want to test AzureVoiceLiveService logging, construct AcsMediaStreamingHandler manually with a mock or test WebSocket if needed.
-// app.Lifetime.ApplicationStarted.Register(() =>
-// {
-//     using var scope = app.Services.CreateScope();
-//     var logger = app.Services.GetRequiredService<ILogger<AzureVoiceLiveService>>();
-//     var fakeWebSocket = ... // Provide a mock/test WebSocket
-//     var mediaStreaming = new AcsMediaStreamingHandler(fakeWebSocket, builder.Configuration, logger);
-//     var azureVoiceLiveService = new AzureVoiceLiveService(mediaStreaming, builder.Configuration, logger);
-//     azureVoiceLiveService.StartConversation();
-// });
 
 await app.RunAsync();

@@ -2,6 +2,7 @@ using System.Net.WebSockets;
 using Azure.Communication.CallAutomation;
 using System.Text;
 using CallAutomation.AzureAI.VoiceLive;
+using CallAutomation.AzureAI.VoiceLive.Services.Interfaces;
 
 public class AcsMediaStreamingHandler
 {
@@ -12,11 +13,18 @@ public class AcsMediaStreamingHandler
     private IConfiguration m_configuration;
     private ILogger<AzureVoiceLiveService> m_logger;
     private string m_callerId;
-    private CallAutomationClient m_callAutomationClient; // NEW: For hanging up calls
-    private Dictionary<string, string> m_activeCallConnections; // NEW: Track active call connections
+    private CallAutomationClient m_callAutomationClient;
+    private Dictionary<string, string> m_activeCallConnections;
+    private readonly IServiceProvider _serviceProvider;
 
-    // MODIFIED: Constructor to accept CallAutomationClient and connection tracking
-    public AcsMediaStreamingHandler(WebSocket webSocket, IConfiguration configuration, ILogger<AzureVoiceLiveService> logger, string callerId, CallAutomationClient callAutomationClient, Dictionary<string, string> activeCallConnections)
+    public AcsMediaStreamingHandler(
+        WebSocket webSocket, 
+        IConfiguration configuration, 
+        ILogger<AzureVoiceLiveService> logger, 
+        string callerId, 
+        CallAutomationClient callAutomationClient, 
+        Dictionary<string, string> activeCallConnections,
+        IServiceProvider serviceProvider)
     {
         m_webSocket = webSocket;
         m_configuration = configuration;
@@ -24,13 +32,13 @@ public class AcsMediaStreamingHandler
         m_cts = new CancellationTokenSource();
         m_logger = logger;
         m_callerId = callerId;
-        m_callAutomationClient = callAutomationClient; // NEW: Store the call automation client
-        m_activeCallConnections = activeCallConnections; // NEW: Store active call connections
+        m_callAutomationClient = callAutomationClient;
+        m_activeCallConnections = activeCallConnections;
+        _serviceProvider = serviceProvider;
         
         m_logger.LogInformation($"🔗 AcsMediaStreamingHandler initialized with Caller ID: {m_callerId}");
     }
 
-    // MODIFIED: Method to receive messages from WebSocket - now passes CallAutomationClient to AzureVoiceLiveService
     public async Task ProcessWebSocketAsync()
     {
         if (m_webSocket == null)
@@ -38,8 +46,18 @@ public class AcsMediaStreamingHandler
             return;
         }
 
-        // MODIFIED: Pass CallAutomationClient and connection tracking to AzureVoiceLiveService
-        m_aiServiceHandler = new AzureVoiceLiveService(this, m_configuration, m_logger, m_callerId, m_callAutomationClient, m_activeCallConnections);
+        // Get services from DI container
+        var staffLookupService = _serviceProvider.GetRequiredService<IStaffLookupService>();
+
+        // Pass all required services to AzureVoiceLiveService
+        m_aiServiceHandler = new AzureVoiceLiveService(
+            this, 
+            m_configuration, 
+            m_logger, 
+            m_callerId, 
+            m_callAutomationClient, 
+            m_activeCallConnections,
+            staffLookupService);
 
         try
         {

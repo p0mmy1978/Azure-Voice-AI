@@ -29,9 +29,9 @@ var client = new CallAutomationClient(acsConnectionString);
 // Register new services for dependency injection
 builder.Services.AddScoped<IStaffLookupService, StaffLookupService>();
 builder.Services.AddScoped<IEmailService, EmailService>();
+builder.Services.AddScoped<ICallManagementService, CallManagementService>();
 
 // You'll add more services here as we extract them:
-// builder.Services.AddScoped<ICallManagementService, CallManagementService>();
 // builder.Services.AddScoped<IFunctionCallProcessor, FunctionCallProcessor>();
 // builder.Services.AddScoped<IAudioStreamProcessor, AudioStreamProcessor>();
 // builder.Services.AddScoped<IVoiceSessionManager, VoiceSessionManager>();

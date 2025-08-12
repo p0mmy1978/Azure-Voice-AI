@@ -49,6 +49,7 @@ public class AcsMediaStreamingHandler
         // Get services from DI container
         var staffLookupService = _serviceProvider.GetRequiredService<IStaffLookupService>();
         var emailService = _serviceProvider.GetRequiredService<IEmailService>();
+        var callManagementService = _serviceProvider.GetRequiredService<ICallManagementService>();
         
         // Initialize email service
         await emailService.InitializeAsync();
@@ -62,7 +63,8 @@ public class AcsMediaStreamingHandler
             m_callAutomationClient, 
             m_activeCallConnections,
             staffLookupService,
-            emailService);
+            emailService,
+            callManagementService);
 
         try
         {

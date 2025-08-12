@@ -17,13 +17,11 @@ namespace CallAutomation.AzureAI.VoiceLive
         private readonly ILogger<AzureVoiceLiveService> _logger;
         private bool m_isEndingCall = false;
         private string m_callerId;
-        private CallAutomationClient m_callAutomationClient;
-        private Dictionary<string, string> m_activeCallConnections;
-        private bool m_hasHungUp = false;
         private DateTime m_goodbyeStartTime;
         private bool m_goodbyeMessageStarted = false;
         private readonly IStaffLookupService _staffLookupService;
         private readonly IEmailService _emailService;
+        private readonly ICallManagementService _callManagementService;
 
         public AzureVoiceLiveService(
             AcsMediaStreamingHandler mediaStreaming, 
@@ -33,19 +31,22 @@ namespace CallAutomation.AzureAI.VoiceLive
             CallAutomationClient callAutomationClient, 
             Dictionary<string, string> activeCallConnections,
             IStaffLookupService staffLookupService,
-            IEmailService emailService)
+            IEmailService emailService,
+            ICallManagementService callManagementService)
         {
             m_mediaStreaming = mediaStreaming;
             m_cts = new CancellationTokenSource();
             m_configuration = configuration;
             _logger = logger;
             m_callerId = callerId;
-            m_callAutomationClient = callAutomationClient;
-            m_activeCallConnections = activeCallConnections;
             _staffLookupService = staffLookupService;
             _emailService = emailService;
+            _callManagementService = callManagementService;
             
             _logger.LogInformation($"🎯 AzureVoiceLiveService initialized with Caller ID: {m_callerId}");
+            
+            // Initialize the call management service
+            _callManagementService.Initialize(callAutomationClient, activeCallConnections);
             
             CreateAISessionAsync(configuration).GetAwaiter().GetResult();
         }
@@ -448,30 +449,10 @@ namespace CallAutomation.AzureAI.VoiceLive
 
         private async Task HangUpAcsCall()
         {
-            if (m_hasHungUp) return;
-            m_hasHungUp = true;
-            
-            try
+            var success = await _callManagementService.HangUpCallAsync(m_callerId);
+            if (!success)
             {
-                var callConnectionId = m_activeCallConnections.Values.FirstOrDefault();
-                
-                if (!string.IsNullOrEmpty(callConnectionId))
-                {
-                    _logger.LogInformation($"📞 Hanging up ACS call with CallConnectionId: {callConnectionId}");
-                    
-                    var callConnection = m_callAutomationClient.GetCallConnection(callConnectionId);
-                    await callConnection.HangUpAsync(forEveryone: true);
-                    
-                    _logger.LogInformation($"✅ Successfully hung up ACS call: {callConnectionId}");
-                }
-                else
-                {
-                    _logger.LogWarning($"⚠️ No CallConnectionId found to hang up");
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "❌ Failed to hang up ACS call");
+                _logger.LogWarning($"⚠️ Failed to hang up call for caller: {m_callerId}");
             }
         }
 

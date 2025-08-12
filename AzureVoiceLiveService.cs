@@ -23,6 +23,7 @@ namespace CallAutomation.AzureAI.VoiceLive
         private readonly IEmailService _emailService;
         private readonly ICallManagementService _callManagementService;
         private readonly IFunctionCallProcessor _functionCallProcessor;
+        private readonly IAudioStreamProcessor _audioStreamProcessor;
 
         public AzureVoiceLiveService(
             AcsMediaStreamingHandler mediaStreaming, 
@@ -34,7 +35,8 @@ namespace CallAutomation.AzureAI.VoiceLive
             IStaffLookupService staffLookupService,
             IEmailService emailService,
             ICallManagementService callManagementService,
-            IFunctionCallProcessor functionCallProcessor)
+            IFunctionCallProcessor functionCallProcessor,
+            IAudioStreamProcessor audioStreamProcessor)
         {
             m_mediaStreaming = mediaStreaming;
             m_cts = new CancellationTokenSource();
@@ -45,6 +47,7 @@ namespace CallAutomation.AzureAI.VoiceLive
             _emailService = emailService;
             _callManagementService = callManagementService;
             _functionCallProcessor = functionCallProcessor;
+            _audioStreamProcessor = audioStreamProcessor;
             
             _logger.LogInformation($"🎯 AzureVoiceLiveService initialized with Caller ID: {m_callerId}");
             
@@ -210,14 +213,11 @@ namespace CallAutomation.AzureAI.VoiceLive
                         if (messageType == "response.audio.delta")
                         {
                             var delta = root.GetProperty("delta").GetString();
-                            var jsonString = OutStreamingData.GetAudioDataForOutbound(Convert.FromBase64String(delta));
-                            await m_mediaStreaming.SendMessageAsync(jsonString);
+                            await _audioStreamProcessor.ProcessAudioDeltaAsync(delta!, m_mediaStreaming);
                         }
                         else if (messageType == "input_audio_buffer.speech_started")
                         {
-                            _logger.LogInformation("-- Voice activity detection started");
-                            var jsonString = OutStreamingData.GetStopAudioForOutbound();
-                            await m_mediaStreaming.SendMessageAsync(jsonString);
+                            await _audioStreamProcessor.HandleVoiceActivityAsync(true, m_mediaStreaming);
                         }
                         else if (messageType == "response.function_call_arguments.done")
                         {
@@ -332,15 +332,7 @@ namespace CallAutomation.AzureAI.VoiceLive
 
         public async Task SendAudioToExternalAI(byte[] data)
         {
-            var audioBytes = Convert.ToBase64String(data);
-            var jsonObject = new
-            {
-                type = "input_audio_buffer.append",
-                audio = audioBytes
-            };
-
-            var message = JsonSerializer.Serialize(jsonObject, new JsonSerializerOptions { WriteIndented = true });
-            await SendMessageAsync(message, CancellationToken.None);
+            await _audioStreamProcessor.SendAudioToExternalAIAsync(data, SendMessageAsync);
         }
 
         public async Task Close()

@@ -48,6 +48,10 @@ public class AcsMediaStreamingHandler
 
         // Get services from DI container
         var staffLookupService = _serviceProvider.GetRequiredService<IStaffLookupService>();
+        var emailService = _serviceProvider.GetRequiredService<IEmailService>();
+        
+        // Initialize email service
+        await emailService.InitializeAsync();
 
         // Pass all required services to AzureVoiceLiveService
         m_aiServiceHandler = new AzureVoiceLiveService(
@@ -57,7 +61,8 @@ public class AcsMediaStreamingHandler
             m_callerId, 
             m_callAutomationClient, 
             m_activeCallConnections,
-            staffLookupService);
+            staffLookupService,
+            emailService);
 
         try
         {

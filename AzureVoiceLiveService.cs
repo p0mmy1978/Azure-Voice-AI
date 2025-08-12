@@ -2,12 +2,6 @@ using System.Net.WebSockets;
 using Azure.Communication.CallAutomation;
 using System.Text;
 using System.Text.Json;
-using Azure.Data.Tables;
-using Microsoft.Graph;
-using Microsoft.Graph.Models;
-using Microsoft.Graph.Models.ODataErrors;
-using Microsoft.Graph.Users.Item.SendMail;
-using Azure.Identity;
 using CallAutomation.AzureAI.VoiceLive.Models;
 using CallAutomation.AzureAI.VoiceLive.Services.Interfaces;
 
@@ -20,7 +14,6 @@ namespace CallAutomation.AzureAI.VoiceLive
         private string m_answerPromptSystemTemplate = "You are an AI assistant that helps people find information.";
         private ClientWebSocket m_azureVoiceLiveWebsocket = default!;
         private IConfiguration m_configuration;
-        private GraphServiceClient m_graphClient = default!;
         private readonly ILogger<AzureVoiceLiveService> _logger;
         private bool m_isEndingCall = false;
         private string m_callerId;
@@ -30,6 +23,7 @@ namespace CallAutomation.AzureAI.VoiceLive
         private DateTime m_goodbyeStartTime;
         private bool m_goodbyeMessageStarted = false;
         private readonly IStaffLookupService _staffLookupService;
+        private readonly IEmailService _emailService;
 
         public AzureVoiceLiveService(
             AcsMediaStreamingHandler mediaStreaming, 
@@ -38,7 +32,8 @@ namespace CallAutomation.AzureAI.VoiceLive
             string callerId, 
             CallAutomationClient callAutomationClient, 
             Dictionary<string, string> activeCallConnections,
-            IStaffLookupService staffLookupService)
+            IStaffLookupService staffLookupService,
+            IEmailService emailService)
         {
             m_mediaStreaming = mediaStreaming;
             m_cts = new CancellationTokenSource();
@@ -48,21 +43,11 @@ namespace CallAutomation.AzureAI.VoiceLive
             m_callAutomationClient = callAutomationClient;
             m_activeCallConnections = activeCallConnections;
             _staffLookupService = staffLookupService;
+            _emailService = emailService;
             
             _logger.LogInformation($"🎯 AzureVoiceLiveService initialized with Caller ID: {m_callerId}");
             
-            InitGraphClient();
             CreateAISessionAsync(configuration).GetAwaiter().GetResult();
-        }
-
-        private void InitGraphClient()
-        {
-            var tenantId = m_configuration["GraphTenantId"];
-            var clientId = m_configuration["GraphClientId"];
-            var clientSecret = m_configuration["GraphClientSecret"];
-
-            var clientSecretCredential = new ClientSecretCredential(tenantId, clientId, clientSecret);
-            m_graphClient = new GraphServiceClient(clientSecretCredential, new[] { "https://graph.microsoft.com/.default" });
         }
 
         private async Task CreateAISessionAsync(IConfiguration configuration)
@@ -492,89 +477,10 @@ namespace CallAutomation.AzureAI.VoiceLive
 
         private async Task SendEmailToUserAsync(string name, string email, string message)
         {
-            try
+            var success = await _emailService.SendMessageEmailAsync(name, email, message, m_callerId);
+            if (!success)
             {
-                _logger.LogInformation($"📬 Begin SendEmailToUserAsync for {name} <{message}> from caller: {m_callerId}");
-                
-                var timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
-                var formattedCallerNumber = FormatCallerNumber(m_callerId);
-                
-                var formattedMessage = $@"You have received a new after-hours message:
-
-Time: {timestamp}
-Caller Number: {formattedCallerNumber}
-Message: {message}";
-
-                var mail = new Message
-                {
-                    Subject = $"New after-hours message from POMS.Tech",
-                    Body = new ItemBody
-                    {
-                        ContentType = BodyType.Text,
-                        Content = formattedMessage
-                    },
-                    ToRecipients = new List<Recipient>
-                    {
-                        new Recipient { EmailAddress = new EmailAddress { Address = email } }
-                    }
-                };
-
-                var requestBody = new SendMailPostRequestBody
-                {
-                    Message = mail,
-                    SaveToSentItems = true
-                };
-
-                _logger.LogInformation($"📤 Sending mail via Graph API to {email}...");
-                await m_graphClient.Users[m_configuration["GraphSenderUPN"]].SendMail.PostAsync(requestBody);
-                _logger.LogInformation($"✅ Message sent to {name} at {email} with caller ID: {formattedCallerNumber}");
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, $"❌ Failed to send email");
-            }
-        }
-
-        private string FormatCallerNumber(string rawCallerNumber)
-        {
-            if (string.IsNullOrWhiteSpace(rawCallerNumber))
-            {
-                return "Unknown";
-            }
-
-            try
-            {
-                _logger.LogInformation($"🔍 Raw caller number received: '{rawCallerNumber}'");
-                
-                var digitsOnly = new string(rawCallerNumber.Where(c => char.IsDigit(c)).ToArray());
-                
-                _logger.LogInformation($"🔍 Digits extracted: '{digitsOnly}'");
-                
-                if (!string.IsNullOrEmpty(digitsOnly))
-                {
-                    if (digitsOnly.StartsWith("461") && digitsOnly.Length >= 12)
-                    {
-                        var cleanNumber = digitsOnly.Substring(1);
-                        _logger.LogInformation($"🔍 Removed ACS prefix '4', clean number: '{cleanNumber}'");
-                        return $"+{cleanNumber}";
-                    }
-                    else if (digitsOnly.StartsWith("61") && digitsOnly.Length >= 11)
-                    {
-                        return $"+{digitsOnly}";
-                    }
-                    else if (digitsOnly.Length >= 10)
-                    {
-                        return $"+{digitsOnly}";
-                    }
-                }
-                
-                _logger.LogWarning($"Could not format caller number: '{rawCallerNumber}'");
-                return rawCallerNumber;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, $"Failed to format caller number: {rawCallerNumber}");
-                return rawCallerNumber;
+                _logger.LogWarning($"❌ Failed to send email to {name} at {email}");
             }
         }
 

@@ -21,13 +21,26 @@ namespace CallAutomation.AzureAI.VoiceLive
         private GraphServiceClient m_graphClient = default!;
         private readonly ILogger<AzureVoiceLiveService> _logger;
         private bool m_isEndingCall = false;
+        private string m_callerId;
+        private CallAutomationClient m_callAutomationClient; // For hanging up calls
+        private Dictionary<string, string> m_activeCallConnections; // Track active call connections
+        private bool m_hasHungUp = false; // Prevent multiple hangups
+        private DateTime m_goodbyeStartTime; // Track when goodbye message started
+        private bool m_goodbyeMessageStarted = false; // Track if goodbye message has started
 
-        public AzureVoiceLiveService(AcsMediaStreamingHandler mediaStreaming, IConfiguration configuration, ILogger<AzureVoiceLiveService> logger)
+        // Constructor to accept CallAutomationClient and connection tracking
+        public AzureVoiceLiveService(AcsMediaStreamingHandler mediaStreaming, IConfiguration configuration, ILogger<AzureVoiceLiveService> logger, string callerId, CallAutomationClient callAutomationClient, Dictionary<string, string> activeCallConnections)
         {
             m_mediaStreaming = mediaStreaming;
             m_cts = new CancellationTokenSource();
             m_configuration = configuration;
             _logger = logger;
+            m_callerId = callerId;
+            m_callAutomationClient = callAutomationClient; // Store the call automation client
+            m_activeCallConnections = activeCallConnections; // Store active call connections
+            
+            _logger.LogInformation($"🎯 AzureVoiceLiveService initialized with Caller ID: {m_callerId}");
+            
             InitGraphClient();
             CreateAISessionAsync(configuration).GetAwaiter().GetResult();
         }
@@ -230,12 +243,30 @@ namespace CallAutomation.AzureAI.VoiceLive
                                 await HandleEndCall(callId, cancellationToken);
                             }
                         }
+                        else if (messageType == "response.output_item.added")
+                        {
+                            // NEW: Detect when goodbye message starts
+                            if (m_isEndingCall && !m_goodbyeMessageStarted)
+                            {
+                                m_goodbyeMessageStarted = true;
+                                m_goodbyeStartTime = DateTime.Now;
+                                _logger.LogInformation("🎤 Goodbye message started - tracking timing");
+                            }
+                        }
                         else if (messageType == "response.done")
                         {
                             _logger.LogInformation("🔵 AI response completed");
                             if (m_isEndingCall)
                             {
-                                _logger.LogInformation("🔚 Call ending detected - AI response completed, closing call now");
+                                _logger.LogInformation("🔚 Call ending detected - AI response completed");
+                                
+                                // Calculate how long to wait based on goodbye message timing
+                                var additionalDelay = CalculateGoodbyeDelay();
+                                _logger.LogInformation($"⏱️ Waiting {additionalDelay}ms for goodbye message to complete");
+                                
+                                await Task.Delay(additionalDelay);
+                                
+                                await HangUpAcsCall();
                                 await Close();
                                 return;
                             }
@@ -245,7 +276,15 @@ namespace CallAutomation.AzureAI.VoiceLive
                             _logger.LogInformation("🔊 Audio response completed");
                             if (m_isEndingCall)
                             {
-                                _logger.LogInformation("🔚 Call ending detected - Audio completed, closing call now");
+                                _logger.LogInformation("🔚 Call ending detected - Audio generation completed");
+                                
+                                // Calculate how long to wait for audio playback to finish
+                                var additionalDelay = CalculateGoodbyeDelay();
+                                _logger.LogInformation($"⏱️ Waiting {additionalDelay}ms for audio playback to complete");
+                                
+                                await Task.Delay(additionalDelay);
+                                
+                                await HangUpAcsCall();
                                 await Close();
                                 return;
                             }
@@ -256,6 +295,38 @@ namespace CallAutomation.AzureAI.VoiceLive
             catch (Exception ex)
             {
                 Console.WriteLine($"Receive error: {ex.Message}");
+            }
+        }
+
+        // NEW: Calculate appropriate delay for goodbye message
+        private int CalculateGoodbyeDelay()
+        {
+            if (m_goodbyeMessageStarted)
+            {
+                // Calculate elapsed time since goodbye started
+                var elapsedSinceGoodbye = DateTime.Now - m_goodbyeStartTime;
+                
+                // Typical goodbye message: "Thanks for calling poms.tech, have a great day!"
+                // Estimate: ~4 seconds to say this at normal pace + buffer for audio transmission/processing
+                var estimatedGoodbyeDuration = TimeSpan.FromSeconds(5);
+                
+                var remainingTime = estimatedGoodbyeDuration - elapsedSinceGoodbye;
+                
+                if (remainingTime.TotalMilliseconds > 0)
+                {
+                    // Add extra buffer for audio transmission and processing delays
+                    return (int)remainingTime.TotalMilliseconds + 1500;
+                }
+                else
+                {
+                    // If somehow we're already past the estimated time, add a small buffer
+                    return 1000;
+                }
+            }
+            else
+            {
+                // Fallback if we couldn't track timing - use longer delay
+                return 6000; // 6 seconds should be plenty for the goodbye message
             }
         }
 
@@ -559,6 +630,7 @@ namespace CallAutomation.AzureAI.VoiceLive
             }
         }
 
+        // FIXED: HandleEndCall - improved timing management
         private async Task HandleEndCall(string callId, CancellationToken cancellationToken)
         {
             _logger.LogInformation("🟣 end_call function triggered. Setting call ending flag and preparing goodbye message.");
@@ -588,22 +660,67 @@ namespace CallAutomation.AzureAI.VoiceLive
             _logger.LogInformation($"[DEBUG] Triggering AI goodbye response: {jsonCreateResponse}");
             await SendMessageAsync(jsonCreateResponse, cancellationToken);
             
-            _logger.LogInformation("🟣 End call function completed. Waiting for AI to finish goodbye message before closing.");
+            _logger.LogInformation("🟣 End call function completed. Goodbye message will be spoken, then call will be hung up after appropriate delay.");
         }
 
+        // Method to hang up the actual ACS call with guard to prevent multiple hangups
+        private async Task HangUpAcsCall()
+        {
+            if (m_hasHungUp) return; // Prevent multiple hangups
+            m_hasHungUp = true;
+            
+            try
+            {
+                // Find the call connection ID for this session
+                var callConnectionId = m_activeCallConnections.Values.FirstOrDefault();
+                
+                if (!string.IsNullOrEmpty(callConnectionId))
+                {
+                    _logger.LogInformation($"📞 Hanging up ACS call with CallConnectionId: {callConnectionId}");
+                    
+                    var callConnection = m_callAutomationClient.GetCallConnection(callConnectionId);
+                    await callConnection.HangUpAsync(forEveryone: true);
+                    
+                    _logger.LogInformation($"✅ Successfully hung up ACS call: {callConnectionId}");
+                }
+                else
+                {
+                    _logger.LogWarning($"⚠️ No CallConnectionId found to hang up");
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "❌ Failed to hang up ACS call");
+            }
+        }
+
+        // Enhanced email format with caller ID and professional formatting
         private async Task SendEmailToUserAsync(string name, string email, string message)
         {
             try
             {
-                _logger.LogInformation($"📬 Begin SendEmailToUserAsync for {name} <{message}>");
+                _logger.LogInformation($"📬 Begin SendEmailToUserAsync for {name} <{message}> from caller: {m_callerId}");
                 
+                // Format the timestamp
+                var timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+                
+                // Clean and format caller number to E.164 format
+                var formattedCallerNumber = FormatCallerNumber(m_callerId);
+                
+                // Create the formatted message body using the cleaned caller ID
+                var formattedMessage = $@"You have received a new after-hours message:
+
+Time: {timestamp}
+Caller Number: {formattedCallerNumber}
+Message: {message}";
+
                 var mail = new Message
                 {
-                    Subject = $"After-hours message for {name}",
+                    Subject = $"New after-hours message from POMS.Tech",
                     Body = new ItemBody
                     {
                         ContentType = BodyType.Text,
-                        Content = message
+                        Content = formattedMessage
                     },
                     ToRecipients = new List<Recipient>
                     {
@@ -619,11 +736,62 @@ namespace CallAutomation.AzureAI.VoiceLive
 
                 _logger.LogInformation($"📤 Sending mail via Graph API to {email}...");
                 await m_graphClient.Users[m_configuration["GraphSenderUPN"]].SendMail.PostAsync(requestBody);
-                _logger.LogInformation($"✅ Message sent to {name} at {email}");
+                _logger.LogInformation($"✅ Message sent to {name} at {email} with caller ID: {formattedCallerNumber}");
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, $"❌ Failed to send email");
+            }
+        }
+
+        // Helper method to format caller number to E.164 format
+        private string FormatCallerNumber(string rawCallerNumber)
+        {
+            if (string.IsNullOrWhiteSpace(rawCallerNumber))
+            {
+                return "Unknown";
+            }
+
+            try
+            {
+                _logger.LogInformation($"🔍 Raw caller number received: '{rawCallerNumber}'");
+                
+                // Remove any non-digit characters except + 
+                var digitsOnly = new string(rawCallerNumber.Where(c => char.IsDigit(c)).ToArray());
+                
+                _logger.LogInformation($"🔍 Digits extracted: '{digitsOnly}'");
+                
+                // If we have digits, format as E.164
+                if (!string.IsNullOrEmpty(digitsOnly))
+                {
+                    // Look for Australian number pattern (starting with 61)
+                    if (digitsOnly.StartsWith("461") && digitsOnly.Length >= 12)
+                    {
+                        // Remove the leading "4" prefix and format the Australian number
+                        var cleanNumber = digitsOnly.Substring(1); // Remove the "4"
+                        _logger.LogInformation($"🔍 Removed ACS prefix '4', clean number: '{cleanNumber}'");
+                        return $"+{cleanNumber}";
+                    }
+                    else if (digitsOnly.StartsWith("61") && digitsOnly.Length >= 11)
+                    {
+                        // Already a proper Australian number
+                        return $"+{digitsOnly}";
+                    }
+                    else if (digitsOnly.Length >= 10)
+                    {
+                        // Generic international number
+                        return $"+{digitsOnly}";
+                    }
+                }
+                
+                // Fallback: return original if we can't parse it
+                _logger.LogWarning($"Could not format caller number: '{rawCallerNumber}'");
+                return rawCallerNumber;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, $"Failed to format caller number: {rawCallerNumber}");
+                return rawCallerNumber;
             }
         }
 
@@ -647,11 +815,18 @@ namespace CallAutomation.AzureAI.VoiceLive
 
         public async Task Close()
         {
-            m_cts.Cancel();
-            m_cts.Dispose();
-            if (m_azureVoiceLiveWebsocket != null)
+            try
             {
-                await m_azureVoiceLiveWebsocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Normal", CancellationToken.None);
+                m_cts.Cancel();
+                m_cts.Dispose();
+                if (m_azureVoiceLiveWebsocket != null && m_azureVoiceLiveWebsocket.State == WebSocketState.Open)
+                {
+                    await m_azureVoiceLiveWebsocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Normal", CancellationToken.None);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, $"Error closing WebSocket: {ex.Message}");
             }
         }
     }

@@ -30,6 +30,9 @@ var client = new CallAutomationClient(acsConnectionString);
 var app = builder.Build();
 var appBaseUrl = builder.Configuration["AppBaseUrl"]?.TrimEnd('/');
 
+// NEW: Dictionary to track active call connections for hangup
+var activeCallConnections = new Dictionary<string, string>(); // contextId -> callConnectionId
+
 if (string.IsNullOrEmpty(appBaseUrl))
 {
     appBaseUrl = $"https://{Environment.GetEnvironmentVariable("WEBSITE_HOSTNAME")}";
@@ -64,9 +67,12 @@ app.MapPost("/api/incomingCall", async (
         var callerId = Helper.GetCallerId(jsonObject);
         var incomingCallContext = Helper.GetIncomingCallContext(jsonObject);
         logger.LogInformation($"appBaseUrl: {appBaseUrl}");
+        logger.LogInformation($"Caller ID: {callerId}");
         var callbackUri = new Uri(new Uri(appBaseUrl), $"/api/callbacks/{Guid.NewGuid()}?callerId={callerId}");
         logger.LogInformation($"Callback Url: {callbackUri}");
-        var websocketUri = appBaseUrl.Replace("https", "wss") + "/ws";
+        
+        // MODIFIED: Include callerId in WebSocket URL
+        var websocketUri = appBaseUrl.Replace("https", "wss") + $"/ws?callerId={callerId}";
         logger.LogInformation($"WebSocket Url: {websocketUri}");
 
         var mediaStreamingOptions = new MediaStreamingOptions(MediaStreamingAudioChannel.Mixed)
@@ -89,7 +95,7 @@ app.MapPost("/api/incomingCall", async (
     return Results.Ok();
 });
 
-// api to handle call back events
+// MODIFIED: api to handle call back events - now captures CallConnectionId
 app.MapPost("/api/callbacks/{contextId}", async (
     [FromBody] CloudEvent[] cloudEvents,
     [FromRoute] string contextId,
@@ -100,6 +106,18 @@ app.MapPost("/api/callbacks/{contextId}", async (
     {
         CallAutomationEventBase @event = CallAutomationEventParser.Parse(cloudEvent);
         logger.LogInformation($"Event received: {JsonConvert.SerializeObject(@event, Formatting.Indented)}");
+        
+        // NEW: Capture CallConnectionId for hangup later
+        if (@event is CallConnected callConnectedEvent)
+        {
+            activeCallConnections[contextId] = callConnectedEvent.CallConnectionId;
+            logger.LogInformation($"📞 Call connected - storing CallConnectionId: {callConnectedEvent.CallConnectionId} for context: {contextId}");
+        }
+        else if (@event is CallDisconnected callDisconnectedEvent)
+        {
+            activeCallConnections.Remove(contextId);
+            logger.LogInformation($"📞 Call disconnected - removed CallConnectionId for context: {contextId}");
+        }
     }
 
     return Results.Ok();
@@ -107,6 +125,7 @@ app.MapPost("/api/callbacks/{contextId}", async (
 
 app.UseWebSockets();
 
+// MODIFIED: WebSocket handler to pass CallAutomationClient and connection tracking
 app.Use(async (context, next) =>
 {
     if (context.Request.Path == "/ws")
@@ -117,10 +136,16 @@ app.Use(async (context, next) =>
             {
                 var webSocket = await context.WebSockets.AcceptWebSocketAsync();
 
+                // Extract callerId from query string
+                var callerId = context.Request.Query["callerId"].FirstOrDefault() ?? "Unknown";
+                Log.Information($"WebSocket connection established with Caller ID: {callerId}");
+
                 // Get logger from DI for this request
                 var loggerFactory = app.Services.GetRequiredService<ILoggerFactory>();
                 var aiLogger = loggerFactory.CreateLogger<AzureVoiceLiveService>();
-                var mediaService = new AcsMediaStreamingHandler(webSocket, builder.Configuration, aiLogger);
+                
+                // MODIFIED: Pass CallAutomationClient and connection tracking to AcsMediaStreamingHandler
+                var mediaService = new AcsMediaStreamingHandler(webSocket, builder.Configuration, aiLogger, callerId, client, activeCallConnections);
 
                 // Set the single WebSocket connection
                 await mediaService.ProcessWebSocketAsync();

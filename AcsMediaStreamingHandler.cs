@@ -11,18 +11,26 @@ public class AcsMediaStreamingHandler
     private AzureVoiceLiveService m_aiServiceHandler;
     private IConfiguration m_configuration;
     private ILogger<AzureVoiceLiveService> m_logger;
+    private string m_callerId;
+    private CallAutomationClient m_callAutomationClient; // NEW: For hanging up calls
+    private Dictionary<string, string> m_activeCallConnections; // NEW: Track active call connections
 
-    // Constructor to inject AzureAIFoundryClient
-    public AcsMediaStreamingHandler(WebSocket webSocket, IConfiguration configuration, ILogger<AzureVoiceLiveService> logger)
+    // MODIFIED: Constructor to accept CallAutomationClient and connection tracking
+    public AcsMediaStreamingHandler(WebSocket webSocket, IConfiguration configuration, ILogger<AzureVoiceLiveService> logger, string callerId, CallAutomationClient callAutomationClient, Dictionary<string, string> activeCallConnections)
     {
         m_webSocket = webSocket;
         m_configuration = configuration;
         m_buffer = new MemoryStream();
         m_cts = new CancellationTokenSource();
         m_logger = logger;
+        m_callerId = callerId;
+        m_callAutomationClient = callAutomationClient; // NEW: Store the call automation client
+        m_activeCallConnections = activeCallConnections; // NEW: Store active call connections
+        
+        m_logger.LogInformation($"🔗 AcsMediaStreamingHandler initialized with Caller ID: {m_callerId}");
     }
 
-    // Method to receive messages from WebSocket
+    // MODIFIED: Method to receive messages from WebSocket - now passes CallAutomationClient to AzureVoiceLiveService
     public async Task ProcessWebSocketAsync()
     {
         if (m_webSocket == null)
@@ -30,12 +38,11 @@ public class AcsMediaStreamingHandler
             return;
         }
 
-        // start forwarder to AI model
-        m_aiServiceHandler = new AzureVoiceLiveService(this, m_configuration, m_logger);
+        // MODIFIED: Pass CallAutomationClient and connection tracking to AzureVoiceLiveService
+        m_aiServiceHandler = new AzureVoiceLiveService(this, m_configuration, m_logger, m_callerId, m_callAutomationClient, m_activeCallConnections);
 
         try
         {
-            //m_aiServiceHandler.StartConversation();
             await StartReceivingFromAcsMediaWebSocket();
         }
         catch (Exception ex)

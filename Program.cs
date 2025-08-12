@@ -32,9 +32,7 @@ builder.Services.AddScoped<IEmailService, EmailService>();
 builder.Services.AddScoped<ICallManagementService, CallManagementService>();
 builder.Services.AddScoped<IFunctionCallProcessor, FunctionCallProcessor>();
 builder.Services.AddScoped<IAudioStreamProcessor, AudioStreamProcessor>();
-
-// You'll add more services here as we extract them:
-// builder.Services.AddScoped<IVoiceSessionManager, VoiceSessionManager>();
+builder.Services.AddScoped<IVoiceSessionManager, VoiceSessionManager>();
 
 var app = builder.Build();
 var appBaseUrl = builder.Configuration["AppBaseUrl"]?.TrimEnd('/');

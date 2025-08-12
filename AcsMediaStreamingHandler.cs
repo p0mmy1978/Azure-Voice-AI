@@ -10,27 +10,29 @@ public class AcsMediaStreamingHandler
     private MemoryStream m_buffer;
     private AzureVoiceLiveService m_aiServiceHandler;
     private IConfiguration m_configuration;
+    private ILogger<AzureVoiceLiveService> m_logger;
 
     // Constructor to inject AzureAIFoundryClient
-    public AcsMediaStreamingHandler(WebSocket webSocket, IConfiguration configuration)
+    public AcsMediaStreamingHandler(WebSocket webSocket, IConfiguration configuration, ILogger<AzureVoiceLiveService> logger)
     {
         m_webSocket = webSocket;
         m_configuration = configuration;
         m_buffer = new MemoryStream();
         m_cts = new CancellationTokenSource();
+        m_logger = logger;
     }
-      
+
     // Method to receive messages from WebSocket
     public async Task ProcessWebSocketAsync()
-    {    
+    {
         if (m_webSocket == null)
         {
             return;
         }
-        
+
         // start forwarder to AI model
-        m_aiServiceHandler = new AzureVoiceLiveService(this, m_configuration);
-        
+        m_aiServiceHandler = new AzureVoiceLiveService(this, m_configuration, m_logger);
+
         try
         {
             //m_aiServiceHandler.StartConversation();
@@ -104,7 +106,7 @@ public class AcsMediaStreamingHandler
                 if (receiveResult.MessageType != WebSocketMessageType.Close)
                 {
                     string data = Encoding.UTF8.GetString(receiveBuffer).TrimEnd('\0');
-                    await WriteToAzureFoundryAIServiceInputStream(data);               
+                    await WriteToAzureFoundryAIServiceInputStream(data);
                 }
             }
         }

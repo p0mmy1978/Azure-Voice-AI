@@ -1,3 +1,4 @@
+using Serilog;
 using Azure.Communication.CallAutomation;
 using Azure.Messaging;
 using Azure.Messaging.EventGrid;
@@ -5,8 +6,20 @@ using Azure.Messaging.EventGrid.SystemEvents;
 using Microsoft.AspNetCore.Mvc;
 using Newtonsoft.Json;
 using System.ComponentModel.DataAnnotations;
+using CallAutomation.AzureAI.VoiceLive;
+
+
+// Configure Serilog
+Log.Logger = new LoggerConfiguration()
+    .WriteTo.Console()
+    .WriteTo.File("logs/app-log.txt", rollingInterval: RollingInterval.Day)
+    .CreateLogger();
+
 
 var builder = WebApplication.CreateBuilder(args);
+builder.Host.UseSerilog();
+// Register AcsMediaStreamingHandler for DI
+// builder.Services.AddTransient<AcsMediaStreamingHandler>();
 
 //Get ACS Connection String from appsettings.json
 var acsConnectionString = builder.Configuration.GetValue<string>("AcsConnectionString");
@@ -20,7 +33,7 @@ var appBaseUrl = builder.Configuration["AppBaseUrl"]?.TrimEnd('/');
 if (string.IsNullOrEmpty(appBaseUrl))
 {
     appBaseUrl = $"https://{Environment.GetEnvironmentVariable("WEBSITE_HOSTNAME")}";
-    Console.WriteLine($"App base URL: {appBaseUrl}");
+    Log.Information($"App base URL: {appBaseUrl}");
 }
 
 app.MapGet("/", () => "Hello ACS CallAutomation!");
@@ -103,14 +116,18 @@ app.Use(async (context, next) =>
             try
             {
                 var webSocket = await context.WebSockets.AcceptWebSocketAsync();
-                var mediaService = new AcsMediaStreamingHandler(webSocket, builder.Configuration);
+
+                // Get logger from DI for this request
+                var loggerFactory = app.Services.GetRequiredService<ILoggerFactory>();
+                var aiLogger = loggerFactory.CreateLogger<AzureVoiceLiveService>();
+                var mediaService = new AcsMediaStreamingHandler(webSocket, builder.Configuration, aiLogger);
 
                 // Set the single WebSocket connection
                 await mediaService.ProcessWebSocketAsync();
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Exception received {ex}");
+                Log.Error(ex, "Exception received");
             }
         }
         else
@@ -123,5 +140,18 @@ app.Use(async (context, next) =>
         await next(context);
     }
 });
+
+
+// Example: How to get an instance and use it (logs will go to logs/app-log.txt)
+// Example: If you want to test AzureVoiceLiveService logging, construct AcsMediaStreamingHandler manually with a mock or test WebSocket if needed.
+// app.Lifetime.ApplicationStarted.Register(() =>
+// {
+//     using var scope = app.Services.CreateScope();
+//     var logger = app.Services.GetRequiredService<ILogger<AzureVoiceLiveService>>();
+//     var fakeWebSocket = ... // Provide a mock/test WebSocket
+//     var mediaStreaming = new AcsMediaStreamingHandler(fakeWebSocket, builder.Configuration, logger);
+//     var azureVoiceLiveService = new AzureVoiceLiveService(mediaStreaming, builder.Configuration, logger);
+//     azureVoiceLiveService.StartConversation();
+// });
 
 await app.RunAsync();

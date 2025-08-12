@@ -10,3 +10,4 @@ obj/
 .env
 *.log
 appsettings*.json
+logs/

@@ -50,6 +50,7 @@ public class AcsMediaStreamingHandler
         var staffLookupService = _serviceProvider.GetRequiredService<IStaffLookupService>();
         var emailService = _serviceProvider.GetRequiredService<IEmailService>();
         var callManagementService = _serviceProvider.GetRequiredService<ICallManagementService>();
+        var functionCallProcessor = _serviceProvider.GetRequiredService<IFunctionCallProcessor>();
         
         // Initialize email service
         await emailService.InitializeAsync();
@@ -64,7 +65,8 @@ public class AcsMediaStreamingHandler
             m_activeCallConnections,
             staffLookupService,
             emailService,
-            callManagementService);
+            callManagementService,
+            functionCallProcessor);
 
         try
         {

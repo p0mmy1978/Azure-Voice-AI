@@ -22,6 +22,7 @@ namespace CallAutomation.AzureAI.VoiceLive
         private readonly IStaffLookupService _staffLookupService;
         private readonly IEmailService _emailService;
         private readonly ICallManagementService _callManagementService;
+        private readonly IFunctionCallProcessor _functionCallProcessor;
 
         public AzureVoiceLiveService(
             AcsMediaStreamingHandler mediaStreaming, 
@@ -32,7 +33,8 @@ namespace CallAutomation.AzureAI.VoiceLive
             Dictionary<string, string> activeCallConnections,
             IStaffLookupService staffLookupService,
             IEmailService emailService,
-            ICallManagementService callManagementService)
+            ICallManagementService callManagementService,
+            IFunctionCallProcessor functionCallProcessor)
         {
             m_mediaStreaming = mediaStreaming;
             m_cts = new CancellationTokenSource();
@@ -42,6 +44,7 @@ namespace CallAutomation.AzureAI.VoiceLive
             _staffLookupService = staffLookupService;
             _emailService = emailService;
             _callManagementService = callManagementService;
+            _functionCallProcessor = functionCallProcessor;
             
             _logger.LogInformation($"🎯 AzureVoiceLiveService initialized with Caller ID: {m_callerId}");
             
@@ -225,17 +228,17 @@ namespace CallAutomation.AzureAI.VoiceLive
                             _logger.LogInformation($"🟠 Function name: {functionName}, Call ID: {callId}");
                             _logger.LogInformation($"🟠 Raw args: {args}");
 
-                            if (functionName == "check_staff_exists")
+                            // Use the function call processor
+                            var functionResult = await _functionCallProcessor.ProcessFunctionCallAsync(functionName!, args, callId!, m_callerId);
+                            
+                            // Send response back to AI
+                            await _functionCallProcessor.SendFunctionResponseAsync(callId!, functionResult.Output, SendMessageAsync);
+                            
+                            // Handle end call scenario
+                            if (functionResult.ShouldEndCall)
                             {
-                                await HandleCheckStaffExists(args, callId, cancellationToken);
-                            }
-                            else if (functionName == "send_message")
-                            {
-                                await HandleSendMessage(args, callId, cancellationToken);
-                            }
-                            else if (functionName == "end_call")
-                            {
-                                await HandleEndCall(callId, cancellationToken);
+                                m_isEndingCall = true;
+                                _logger.LogInformation("🔚 Call ending requested by function processor");
                             }
                         }
                         else if (messageType == "response.output_item.added")
@@ -313,155 +316,12 @@ namespace CallAutomation.AzureAI.VoiceLive
             }
         }
 
-        private async Task HandleCheckStaffExists(string args, string callId, CancellationToken cancellationToken)
-        {
-            _logger.LogInformation($"🟢 check_staff_exists called with args: {args}");
-            try
-            {
-                var parsed = JsonDocument.Parse(args);
-                var name = parsed.RootElement.GetProperty("name").GetString();
-                var department = parsed.RootElement.TryGetProperty("department", out var deptElement) ? 
-                    deptElement.GetString() : null;
-                
-                // Use the new service instead of inline logic
-                var result = await _staffLookupService.CheckStaffExistsAsync(name!, department);
-                
-                string functionResult = result.Status switch
-                {
-                    StaffLookupStatus.Authorized => "authorized",
-                    StaffLookupStatus.NotAuthorized => "not_authorized", 
-                    StaffLookupStatus.MultipleFound => "multiple_found",
-                    StaffLookupStatus.NotFound => "not_authorized",
-                    _ => "not_authorized"
-                };
-
-                // Send function response back to AI
-                var functionResponse = new
-                {
-                    type = "conversation.item.create",
-                    item = new
-                    {
-                        type = "function_call_output",
-                        call_id = callId,
-                        output = functionResult
-                    }
-                };
-
-                var jsonResponse = JsonSerializer.Serialize(functionResponse, new JsonSerializerOptions { WriteIndented = true });
-                _logger.LogInformation($"[DEBUG] Sending function response to AI: {jsonResponse}");
-                await SendMessageAsync(jsonResponse, cancellationToken);
-
-                // Trigger AI response
-                var createResponse = new { type = "response.create" };
-                var jsonCreateResponse = JsonSerializer.Serialize(createResponse, new JsonSerializerOptions { WriteIndented = true });
-                await SendMessageAsync(jsonCreateResponse, cancellationToken);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, $"🔴 Failed to process check_staff_exists");
-            }
-        }
-
-        private async Task HandleSendMessage(string args, string callId, CancellationToken cancellationToken)
-        {
-            _logger.LogInformation($"🟢 send_message called with args: {args}");
-            try
-            {
-                var parsed = JsonDocument.Parse(args);
-                var name = parsed.RootElement.GetProperty("name").GetString();
-                var message = parsed.RootElement.GetProperty("message").GetString();
-                var department = parsed.RootElement.TryGetProperty("department", out var deptElement) ? 
-                    deptElement.GetString() : null;
-
-                _logger.LogInformation($"🟡 Parsed: name={name}, message={message}, department={department}");
-
-                // Use the new service to get email
-                var email = await _staffLookupService.GetStaffEmailAsync(name!, department);
-                
-                string functionResult;
-                if (!string.IsNullOrWhiteSpace(email))
-                {
-                    _logger.LogInformation($"✅ Sending email to: {name}, email: {email}");
-                    await SendEmailToUserAsync(name, email, message);
-                    functionResult = "success";
-                }
-                else
-                {
-                    _logger.LogWarning($"❌ No valid email found for: {name}");
-                    functionResult = "failed - staff not found or invalid email";
-                }
-
-                // Send function response back to AI
-                var functionResponse = new
-                {
-                    type = "conversation.item.create",
-                    item = new
-                    {
-                        type = "function_call_output",
-                        call_id = callId,
-                        output = functionResult
-                    }
-                };
-
-                var jsonResponse = JsonSerializer.Serialize(functionResponse, new JsonSerializerOptions { WriteIndented = true });
-                _logger.LogInformation($"[DEBUG] Sending function response to AI: {jsonResponse}");
-                await SendMessageAsync(jsonResponse, cancellationToken);
-
-                // Trigger AI response
-                var createResponse = new { type = "response.create" };
-                var jsonCreateResponse = JsonSerializer.Serialize(createResponse, new JsonSerializerOptions { WriteIndented = true });
-                await SendMessageAsync(jsonCreateResponse, cancellationToken);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, $"🔴 Failed to process send_message");
-            }
-        }
-
-        private async Task HandleEndCall(string callId, CancellationToken cancellationToken)
-        {
-            _logger.LogInformation("🟣 end_call function triggered. Setting call ending flag and preparing goodbye message.");
-            
-            m_isEndingCall = true;
-            
-            var functionResponse = new
-            {
-                type = "conversation.item.create",
-                item = new
-                {
-                    type = "function_call_output",
-                    call_id = callId,
-                    output = "call_ended_successfully"
-                }
-            };
-
-            var jsonResponse = JsonSerializer.Serialize(functionResponse, new JsonSerializerOptions { WriteIndented = true });
-            _logger.LogInformation($"[DEBUG] Sending function response to AI: {jsonResponse}");
-            await SendMessageAsync(jsonResponse, cancellationToken);
-
-            var createResponse = new { type = "response.create" };
-            var jsonCreateResponse = JsonSerializer.Serialize(createResponse, new JsonSerializerOptions { WriteIndented = true });
-            _logger.LogInformation($"[DEBUG] Triggering AI goodbye response: {jsonCreateResponse}");
-            await SendMessageAsync(jsonCreateResponse, cancellationToken);
-            
-            _logger.LogInformation("🟣 End call function completed. Goodbye message will be spoken, then call will be hung up after appropriate delay.");
-        }
-
         private async Task HangUpAcsCall()
         {
             var success = await _callManagementService.HangUpCallAsync(m_callerId);
             if (!success)
             {
                 _logger.LogWarning($"⚠️ Failed to hang up call for caller: {m_callerId}");
-            }
-        }
-
-        private async Task SendEmailToUserAsync(string name, string email, string message)
-        {
-            var success = await _emailService.SendMessageEmailAsync(name, email, message, m_callerId);
-            if (!success)
-            {
-                _logger.LogWarning($"❌ Failed to send email to {name} at {email}");
             }
         }
 

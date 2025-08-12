@@ -30,9 +30,9 @@ var client = new CallAutomationClient(acsConnectionString);
 builder.Services.AddScoped<IStaffLookupService, StaffLookupService>();
 builder.Services.AddScoped<IEmailService, EmailService>();
 builder.Services.AddScoped<ICallManagementService, CallManagementService>();
+builder.Services.AddScoped<IFunctionCallProcessor, FunctionCallProcessor>();
 
 // You'll add more services here as we extract them:
-// builder.Services.AddScoped<IFunctionCallProcessor, FunctionCallProcessor>();
 // builder.Services.AddScoped<IAudioStreamProcessor, AudioStreamProcessor>();
 // builder.Services.AddScoped<IVoiceSessionManager, VoiceSessionManager>();
 

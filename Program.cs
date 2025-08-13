@@ -10,10 +10,15 @@ using CallAutomation.AzureAI.VoiceLive;
 using CallAutomation.AzureAI.VoiceLive.Services.Interfaces;
 using CallAutomation.AzureAI.VoiceLive.Services;
 
-// Configure Serilog
+// Configure Serilog with file rotation and size limits
 Log.Logger = new LoggerConfiguration()
     .WriteTo.Console()
-    .WriteTo.File("logs/app-log.txt", rollingInterval: RollingInterval.Day)
+    .WriteTo.File("logs/app-log-.txt",
+        rollingInterval: RollingInterval.Day,           // Still roll daily as a backup
+        fileSizeLimitBytes: 10 * 1024 * 1024,          // 10MB per file
+        rollOnFileSizeLimit: true,                      // Create new file when size limit reached
+        retainedFileCountLimit: 10,                     // Keep max 10 files (10 x 10MB = 100MB total)
+        shared: true)                                   // Allow multiple processes to write
     .CreateLogger();
 
 var builder = WebApplication.CreateBuilder(args);

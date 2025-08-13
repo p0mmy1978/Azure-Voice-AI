@@ -2,6 +2,7 @@ using System.Text.Json;
 using Azure.Communication.CallAutomation;
 using CallAutomation.AzureAI.VoiceLive.Models;
 using CallAutomation.AzureAI.VoiceLive.Services.Interfaces;
+using CallAutomation.AzureAI.VoiceLive.Helpers;
 
 namespace CallAutomation.AzureAI.VoiceLive
 {
@@ -69,21 +70,30 @@ namespace CallAutomation.AzureAI.VoiceLive
                 throw new InvalidOperationException("Failed to connect to Azure Voice Live");
             }
 
-            // Configure the session
+            // Get time-based greetings
+            var greeting = TimeOfDayHelper.GetGreeting();
+            var farewell = TimeOfDayHelper.GetFarewell();
+            var timeOfDay = TimeOfDayHelper.GetTimeOfDay();
+
+            _logger.LogInformation($"🕐 Current time of day: {timeOfDay}, using greeting: '{greeting}', farewell: '{farewell}'");
+
+            // Configure the session with time-aware prompts
             var sessionConfig = new SessionConfig
             {
                 Instructions = string.Join(" ",
                     "You are the after-hours voice assistant for poms.tech.",
-                    "Start with: 'Welcome to poms.tech after hours message service, can I take a message for someone?'",
+                    $"Start with: '{greeting}! Welcome to poms.tech after hours message service, can I take a message for someone?'",
                     "When a caller provides a name, always use the check_staff_exists function to verify if the person is an authorized staff member before proceeding.",
                     "If the caller provides just a first and last name (like 'John Smith'), ask them to specify the department (Sales, IT, etc.) as there may be multiple people with the same name.",
                     "If check_staff_exists returns 'authorized', prompt the caller for their message and use send_message.",
                     "If check_staff_exists returns 'not_authorized', politely inform the caller that you can only take messages for authorized staff members and ask them to call back during business hours, then say 'Thanks for calling, have a great day!' and immediately use the end_call function.",
                     "If check_staff_exists returns 'multiple_found', ask the caller to specify which department the person works in.",
                     "After sending a message successfully, say 'I have sent your message to [name]. Is there anything else I can help you with?'",
-                    "If the caller says 'no', 'nothing else', 'that's all', 'goodbye', 'wrong number', or indicates they want to end the call, immediately say 'Thanks for calling poms.tech, have a great day!' and then use the end_call function.",
+                    "If the caller says 'no', 'nothing else', 'that's all', 'goodbye', 'wrong number', or indicates they want to end the call, immediately say 'Thanks for calling poms.tech, [farewell]!' and then use the end_call function.",
+                    $"IMPORTANT: When ending calls, always use the farewell '{farewell}' instead of generic goodbyes.",
                     "IMPORTANT: After saying any goodbye message, you MUST call the end_call function to properly end the conversation.",
-                    "Never end a conversation without calling the end_call function.")
+                    "Never end a conversation without calling the end_call function.",
+                    $"Remember it's currently {timeOfDay} time, so use appropriate time-based language throughout the conversation.")
             };
 
             await _voiceSessionManager.UpdateSessionAsync(sessionConfig);
@@ -163,7 +173,8 @@ namespace CallAutomation.AzureAI.VoiceLive
             if (functionResult.ShouldEndCall)
             {
                 m_isEndingCall = true;
-                _logger.LogInformation("🔚 Call ending requested");
+                var farewell = TimeOfDayHelper.GetFarewell();
+                _logger.LogInformation($"🔚 Call ending requested - will use farewell: '{farewell}'");
             }
         }
 
@@ -173,7 +184,8 @@ namespace CallAutomation.AzureAI.VoiceLive
             {
                 m_goodbyeMessageStarted = true;
                 m_goodbyeStartTime = DateTime.Now;
-                _logger.LogInformation("🎤 Goodbye message started");
+                var farewell = TimeOfDayHelper.GetFarewell();
+                _logger.LogInformation($"🎤 Goodbye message started with time-appropriate farewell: '{farewell}'");
             }
         }
 

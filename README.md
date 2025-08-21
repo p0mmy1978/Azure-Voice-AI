@@ -155,16 +155,16 @@ sequenceDiagram
 
 ```mermaid
 graph TD
-  A["PSTN Caller"] -->|Dial Number| B["Azure Communication Services"]
-  B --> C["Event Grid<br/>IncomingCall Event"]
-  C --> D["Voice AI App<br/>(Web App / Local)"]
-  D -->|RTP Streaming| B
-  D --> E["Azure AI Voice Live"]
-  E --> F["Azure OpenAI<br/>Realtime Model"]
-  F --> E
-  E --> D
-  D --> B
-  B --> A
+  Caller["☎️ PSTN Caller"] -->|Dial Number| ACS["Azure Communication Services"]
+  ACS --> EG["Event Grid<br/>IncomingCall Event"]
+  EG --> App["Voice AI App<br/>(Web App / Local)"]
+  App -->|RTP Streaming| ACS
+  App --> VoiceLive["Azure AI Voice Live"]
+  VoiceLive --> OpenAI["Azure OpenAI<br/>Realtime Model"]
+  OpenAI --> VoiceLive
+  VoiceLive --> App
+  App --> A["Azure Storage Blob"]
+  App --> B["Graph API Call to EXO"]
 ```
 
 ---

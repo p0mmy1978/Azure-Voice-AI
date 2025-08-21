@@ -151,24 +151,20 @@ sequenceDiagram
 
 ---
 
-### 🏗️ Azure Resource Architecture  
+# Azure Resource Architecture
 
 ```mermaid
 graph TD
-    A[📞 PSTN Caller] -->|Dial Number| B[Azure Communication Services]
-
-    B --> C[Event Grid<br/>IncomingCall Event]
-    C --> D[Voice AI App<br/>(Web App / Local)]
-
-    D -->|RTP Streaming| B
-    D --> E[Azure AI Voice Live]
-
-    E --> F[Azure OpenAI<br/>Realtime Model]
-
-    F --> E
-    E --> D
-    D --> B
-    B --> A
+  A["PSTN Caller"] -->|Dial Number| B["Azure Communication Services"]
+  B --> C["Event Grid<br/>IncomingCall Event"]
+  C --> D["Voice AI App<br/>(Web App / Local)"]
+  D -->|RTP Streaming| B
+  D --> E["Azure AI Voice Live"]
+  E --> F["Azure OpenAI<br/>Realtime Model"]
+  F --> E
+  E --> D
+  D --> B
+  B --> A
 ```
 
 ---

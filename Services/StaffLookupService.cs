@@ -29,15 +29,30 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                 var normalized = NormalizeName(name);
                 _logger.LogInformation($"🔍 [StaffLookup] Checking staff: {name} (normalized: {normalized}), department: {department}");
 
-                // If department is provided, try exact match first
-                if (!string.IsNullOrWhiteSpace(department))
+                // First try exact match
+                var exactResult = await TryExactMatch(normalized, name, department);
+                if (exactResult.Status == StaffLookupStatus.Authorized || exactResult.Status == StaffLookupStatus.MultipleFound)
                 {
-                    return await CheckWithDepartment(normalized, name, department);
+                    return exactResult;
                 }
-                else
+
+                // If no exact match, try fuzzy matching
+                _logger.LogInformation($"🔍 [StaffLookup] No exact match found, trying fuzzy matching for: {name}");
+                var fuzzyResult = await TryFuzzyMatch(name, department);
+                
+                if (fuzzyResult.Status != StaffLookupStatus.NotFound)
                 {
-                    return await CheckWithoutDepartment(normalized, name);
+                    return fuzzyResult;
                 }
+
+                // If still no match, log common mishearings for debugging
+                LogCommonMishearings(name);
+                
+                return new StaffLookupResult 
+                { 
+                    Status = StaffLookupStatus.NotFound,
+                    Message = $"No staff member found matching '{name}'. Please try spelling the name or provide the department."
+                };
             }
             catch (Exception ex)
             {
@@ -48,6 +63,317 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                     Message = "Error occurred during lookup"
                 };
             }
+        }
+
+        private async Task<StaffLookupResult> TryExactMatch(string normalized, string originalName, string? department)
+        {
+            if (!string.IsNullOrWhiteSpace(department))
+            {
+                return await CheckWithDepartment(normalized, originalName, department);
+            }
+            else
+            {
+                return await CheckWithoutDepartment(normalized, originalName);
+            }
+        }
+
+        private async Task<StaffLookupResult> TryFuzzyMatch(string originalName, string? department)
+        {
+            try
+            {
+                // Get all staff members for fuzzy comparison
+                var allStaff = new List<(string RowKey, TableEntity Entity)>();
+                
+                var query = _tableClient.QueryAsync<TableEntity>(
+                    filter: "PartitionKey eq 'staff'",
+                    maxPerPage: 100);
+                
+                await foreach (var entity in query)
+                {
+                    allStaff.Add((entity.RowKey, entity));
+                }
+
+                _logger.LogInformation($"🔍 [FuzzyMatch] Loaded {allStaff.Count} staff members for fuzzy comparison");
+
+                var matches = new List<(double Score, TableEntity Entity, string MatchType)>();
+
+                foreach (var (rowKey, entity) in allStaff)
+                {
+                    // Extract name from RowKey (format: "firstname lastname_department" or "firstnamelastname_department")
+                    var nameFromRowKey = ExtractNameFromRowKey(rowKey);
+                    
+                    // Try multiple fuzzy matching approaches
+                    var phoneticScore = GetPhoneticSimilarity(originalName, nameFromRowKey);
+                    var editDistanceScore = GetEditDistanceSimilarity(originalName, nameFromRowKey);
+                    var tokenScore = GetTokenSimilarity(originalName, nameFromRowKey);
+
+                    // Use the highest score from different matching methods
+                    var bestScore = Math.Max(Math.Max(phoneticScore, editDistanceScore), tokenScore);
+                    var matchType = bestScore == phoneticScore ? "Phonetic" : 
+                                   bestScore == editDistanceScore ? "EditDistance" : "Token";
+
+                    if (bestScore > 0.7) // Threshold for fuzzy matching
+                    {
+                        matches.Add((bestScore, entity, matchType));
+                        _logger.LogInformation($"🎯 [FuzzyMatch] Found potential match: '{nameFromRowKey}' for '{originalName}' (Score: {bestScore:F2}, Method: {matchType})");
+                    }
+                }
+
+                // Sort by similarity score (highest first)
+                matches.Sort((a, b) => b.Score.CompareTo(a.Score));
+
+                if (matches.Count == 0)
+                {
+                    return new StaffLookupResult { Status = StaffLookupStatus.NotFound };
+                }
+
+                // Filter by department if specified
+                if (!string.IsNullOrWhiteSpace(department))
+                {
+                    var deptMatches = matches.Where(m => 
+                        m.Entity.ContainsKey("Department") && 
+                        string.Equals(m.Entity["Department"]?.ToString(), department, StringComparison.OrdinalIgnoreCase))
+                        .ToList();
+
+                    if (deptMatches.Count == 1)
+                    {
+                        var match = deptMatches[0];
+                        var email = GetEmailFromEntity(match.Entity);
+                        
+                        if (IsValidEmail(email))
+                        {
+                            var matchedName = ExtractNameFromRowKey(match.Entity.RowKey);
+                            _logger.LogInformation($"✅ [FuzzyMatch] Single department match found: '{matchedName}' for '{originalName}' in {department} (Score: {match.Score:F2}, Method: {match.MatchType})");
+                            
+                            return new StaffLookupResult
+                            {
+                                Status = StaffLookupStatus.Authorized,
+                                Email = email,
+                                RowKey = match.Entity.RowKey,
+                                Message = $"Found staff member '{matchedName}' (fuzzy match with {match.Score:F2} confidence)"
+                            };
+                        }
+                    }
+                    else if (deptMatches.Count > 1)
+                    {
+                        return new StaffLookupResult
+                        {
+                            Status = StaffLookupStatus.MultipleFound,
+                            Message = "Multiple similar staff members found in the specified department"
+                        };
+                    }
+                }
+                else
+                {
+                    // No department specified - use best match if confidence is high enough
+                    var bestMatch = matches[0];
+                    
+                    // Higher threshold when no department is specified
+                    if (bestMatch.Score > 0.85)
+                    {
+                        var email = GetEmailFromEntity(bestMatch.Entity);
+                        
+                        if (IsValidEmail(email))
+                        {
+                            var matchedName = ExtractNameFromRowKey(bestMatch.Entity.RowKey);
+                            _logger.LogInformation($"✅ [FuzzyMatch] High-confidence match found: '{matchedName}' for '{originalName}' (Score: {bestMatch.Score:F2}, Method: {bestMatch.MatchType})");
+                            
+                            return new StaffLookupResult
+                            {
+                                Status = StaffLookupStatus.Authorized,
+                                Email = email,
+                                RowKey = bestMatch.Entity.RowKey,
+                                Message = $"Found staff member '{matchedName}' (fuzzy match with {bestMatch.Score:F2} confidence)"
+                            };
+                        }
+                    }
+                    else if (matches.Count > 1 && matches.Take(2).All(m => m.Score > 0.7))
+                    {
+                        // Multiple good matches - ask for department
+                        var departments = matches.Take(3)
+                            .Where(m => m.Entity.ContainsKey("Department"))
+                            .Select(m => m.Entity["Department"]?.ToString())
+                            .Where(d => !string.IsNullOrWhiteSpace(d))
+                            .Distinct()
+                            .ToList();
+
+                        return new StaffLookupResult
+                        {
+                            Status = StaffLookupStatus.MultipleFound,
+                            AvailableDepartments = departments,
+                            Message = $"Found multiple similar staff members for '{originalName}'. Please specify the department."
+                        };
+                    }
+                }
+
+                return new StaffLookupResult { Status = StaffLookupStatus.NotFound };
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, $"🔴 Error during fuzzy matching for: {originalName}");
+                return new StaffLookupResult { Status = StaffLookupStatus.NotFound };
+            }
+        }
+
+        private void LogCommonMishearings(string heardName)
+        {
+            // Log potential alternatives for common speech recognition errors
+            var commonMishearings = new Dictionary<string, string[]>
+            {
+                ["tock"] = ["tops", "talk", "tok", "tox"],
+                ["tops"] = ["tock", "tops", "taps", "tips"],
+                ["smith"] = ["smyth", "smythe", "schmith"],
+                ["jon"] = ["john", "joan", "jean"],
+                ["brian"] = ["bryan", "bryant"],
+                ["mary"] = ["marie", "merry", "mary"],
+                ["catherine"] = ["katherine", "kathryn", "katharine"]
+            };
+
+            var normalized = heardName.ToLowerInvariant();
+            var alternatives = new List<string>();
+
+            foreach (var (error, corrections) in commonMishearings)
+            {
+                if (normalized.Contains(error))
+                {
+                    foreach (var correction in corrections)
+                    {
+                        var alternative = normalized.Replace(error, correction);
+                        alternatives.Add(alternative);
+                    }
+                }
+            }
+
+            if (alternatives.Any())
+            {
+                _logger.LogInformation($"💡 [SpeechHints] For '{heardName}', consider these alternatives: {string.Join(", ", alternatives)}");
+            }
+        }
+
+        private string ExtractNameFromRowKey(string rowKey)
+        {
+            // RowKey format: "firstnamelastname_department" -> extract name part
+            var underscoreIndex = rowKey.LastIndexOf('_');
+            var namePart = underscoreIndex > 0 ? rowKey.Substring(0, underscoreIndex) : rowKey;
+            
+            // Try to reconstruct readable name by adding space before capital letters
+            // This is a heuristic and may not work perfectly for all names
+            var result = new System.Text.StringBuilder();
+            for (int i = 0; i < namePart.Length; i++)
+            {
+                if (i > 0 && char.IsUpper(namePart[i]) && char.IsLower(namePart[i - 1]))
+                {
+                    result.Append(' ');
+                }
+                result.Append(namePart[i]);
+            }
+            
+            return result.ToString();
+        }
+
+        // Phonetic similarity using simple Soundex-like algorithm
+        private double GetPhoneticSimilarity(string name1, string name2)
+        {
+            var soundex1 = GetSimpleSoundex(name1);
+            var soundex2 = GetSimpleSoundex(name2);
+            
+            return soundex1 == soundex2 ? 1.0 : 0.0;
+        }
+
+        private string GetSimpleSoundex(string input)
+        {
+            if (string.IsNullOrWhiteSpace(input)) return "";
+            
+            var normalized = input.ToLowerInvariant().Replace(" ", "");
+            var soundex = new System.Text.StringBuilder();
+            
+            // Keep first letter
+            soundex.Append(char.ToUpperInvariant(normalized[0]));
+            
+            // Simple consonant mapping (simplified Soundex)
+            var consonantMap = new Dictionary<char, char>
+            {
+                ['b'] = '1', ['f'] = '1', ['p'] = '1', ['v'] = '1',
+                ['c'] = '2', ['g'] = '2', ['j'] = '2', ['k'] = '2', ['q'] = '2', ['s'] = '2', ['x'] = '2', ['z'] = '2',
+                ['d'] = '3', ['t'] = '3',
+                ['l'] = '4',
+                ['m'] = '5', ['n'] = '5',
+                ['r'] = '6'
+            };
+            
+            for (int i = 1; i < normalized.Length && soundex.Length < 4; i++)
+            {
+                if (consonantMap.TryGetValue(normalized[i], out var code))
+                {
+                    if (soundex.Length == 1 || soundex[soundex.Length - 1] != code)
+                    {
+                        soundex.Append(code);
+                    }
+                }
+            }
+            
+            // Pad with zeros
+            while (soundex.Length < 4)
+            {
+                soundex.Append('0');
+            }
+            
+            return soundex.ToString();
+        }
+
+        // Edit distance (Levenshtein) similarity
+        private double GetEditDistanceSimilarity(string name1, string name2)
+        {
+            var s1 = name1.ToLowerInvariant().Replace(" ", "");
+            var s2 = name2.ToLowerInvariant().Replace(" ", "");
+            
+            var distance = LevenshteinDistance(s1, s2);
+            var maxLength = Math.Max(s1.Length, s2.Length);
+            
+            return maxLength == 0 ? 1.0 : 1.0 - (double)distance / maxLength;
+        }
+
+        private int LevenshteinDistance(string s1, string s2)
+        {
+            var dp = new int[s1.Length + 1, s2.Length + 1];
+            
+            for (int i = 0; i <= s1.Length; i++) dp[i, 0] = i;
+            for (int j = 0; j <= s2.Length; j++) dp[0, j] = j;
+            
+            for (int i = 1; i <= s1.Length; i++)
+            {
+                for (int j = 1; j <= s2.Length; j++)
+                {
+                    var cost = s1[i - 1] == s2[j - 1] ? 0 : 1;
+                    dp[i, j] = Math.Min(Math.Min(dp[i - 1, j] + 1, dp[i, j - 1] + 1), dp[i - 1, j - 1] + cost);
+                }
+            }
+            
+            return dp[s1.Length, s2.Length];
+        }
+
+        // Token-based similarity (comparing individual words)
+        private double GetTokenSimilarity(string name1, string name2)
+        {
+            var tokens1 = name1.ToLowerInvariant().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            var tokens2 = name2.ToLowerInvariant().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            
+            if (tokens1.Length == 0 || tokens2.Length == 0) return 0.0;
+            
+            var matches = 0;
+            foreach (var token1 in tokens1)
+            {
+                foreach (var token2 in tokens2)
+                {
+                    if (GetEditDistanceSimilarity(token1, token2) > 0.8)
+                    {
+                        matches++;
+                        break;
+                    }
+                }
+            }
+            
+            return (double)matches / Math.Max(tokens1.Length, tokens2.Length);
         }
 
         public async Task<string?> GetStaffEmailAsync(string name, string? department = null)

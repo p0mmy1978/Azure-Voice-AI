@@ -31,11 +31,29 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                 var websocketUrl = new Uri($"{endpoint.Replace("https", "wss")}/voice-agent/realtime?api-version=2025-05-01-preview&x-ms-client-request-id={Guid.NewGuid()}&model={model}&api-key={apiKey}");
 
                 _webSocket = new ClientWebSocket();
-                _logger.LogInformation($"🔗 Connecting to Azure Voice Live: {websocketUrl}");
                 
-                await _webSocket.ConnectAsync(websocketUrl, CancellationToken.None);
+                _webSocket.Options.SetRequestHeader("User-Agent", "AzureVoiceAI/1.0");
+                _webSocket.Options.KeepAliveInterval = TimeSpan.FromSeconds(30);
                 
-                _logger.LogInformation("✅ Connected to Azure Voice Live successfully!");
+                _logger.LogInformation($"🔗 Connecting to Azure Voice Live:");
+                _logger.LogInformation($"   Endpoint: {endpoint}");
+                _logger.LogInformation($"   Model: {model}");
+                _logger.LogInformation($"   API Key: {apiKey.Substring(0, Math.Min(10, apiKey.Length))}...");
+                
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+                await _webSocket.ConnectAsync(websocketUrl, cts.Token);
+                
+                _logger.LogInformation($"✅ Connected to Azure Voice Live successfully! State: {_webSocket.State}");
+                
+                await Task.Delay(1000);
+                
+                if (_webSocket.State != WebSocketState.Open)
+                {
+                    _logger.LogError($"❌ Connection closed immediately after connecting. Final state: {_webSocket.State}");
+                    return false;
+                }
+                
+                _logger.LogInformation("🎯 Connection stable after 1 second check");
                 return true;
             }
             catch (Exception ex)
@@ -55,39 +73,40 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                     return false;
                 }
 
+                // Simplified session configuration - only using supported features
                 var sessionObject = new
                 {
                     type = "session.update",
                     session = new
                     {
                         instructions = config.Instructions,
-                        turn_detection = new
-                        {
-                            type = "azure_semantic_vad",
-                            threshold = config.VadThreshold,
-                            prefix_padding_ms = config.PrefixPaddingMs,
-                            silence_duration_ms = config.SilenceDurationMs,
-                            remove_filler_words = config.RemoveFillerWords
-                        },
-                        input_audio_noise_reduction = new { type = "azure_deep_noise_suppression" },
-                        input_audio_echo_cancellation = new { type = "server_echo_cancellation" },
+                        
+                        // Basic voice configuration (your original working format)
                         voice = new
                         {
                             name = config.VoiceName,
                             type = "azure-standard",
                             temperature = config.VoiceTemperature
                         },
+                        
+                        // Enhanced function tools
                         tools = new object[]
                         {
                             new {
                                 type = "function",
                                 name = "check_staff_exists",
-                                description = "Check if a staff member is authorized to receive messages. Include department if known.",
+                                description = "Check if a staff member is authorized to receive messages. Include department if known. This function now supports advanced fuzzy matching for names that might be misheard by speech recognition (like 'Tock' vs 'Tops', 'Smith' vs 'Smyth', etc.).",
                                 parameters = new {
                                     type = "object",
                                     properties = new {
-                                        name = new { type = "string", description = "The name of the person to check" },
-                                        department = new { type = "string", description = "The department the person works in (optional)" }
+                                        name = new { 
+                                            type = "string", 
+                                            description = "The name of the person to check. Will be fuzzy matched if not found exactly, so don't worry about minor spelling variations from speech recognition." 
+                                        },
+                                        department = new { 
+                                            type = "string", 
+                                            description = "The department the person works in (optional but helps with accuracy when there are multiple people with similar names)" 
+                                        }
                                     },
                                     required = new[] { "name" }
                                 }
@@ -95,13 +114,22 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                             new {
                                 type = "function",
                                 name = "send_message",
-                                description = "Send a message to a staff member.",
+                                description = "Send a message to a staff member after they have been verified as authorized through check_staff_exists.",
                                 parameters = new {
                                     type = "object",
                                     properties = new {
-                                        name = new { type = "string", description = "The name of the person to send the message to" },
-                                        message = new { type = "string", description = "The message to send" },
-                                        department = new { type = "string", description = "The department the person works in (optional)" }
+                                        name = new { 
+                                            type = "string", 
+                                            description = "The exact name of the person to send the message to (use the name as confirmed by check_staff_exists)" 
+                                        },
+                                        message = new { 
+                                            type = "string", 
+                                            description = "The message content from the caller" 
+                                        },
+                                        department = new { 
+                                            type = "string", 
+                                            description = "The department the person works in (optional but recommended for accuracy)" 
+                                        }
                                     },
                                     required = new[] { "name", "message" }
                                 }
@@ -109,7 +137,7 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                             new {
                                 type = "function",
                                 name = "end_call",
-                                description = "End the call gracefully after saying goodbye.",
+                                description = "End the call gracefully after saying goodbye. Must be called after any goodbye message to properly terminate the conversation.",
                                 parameters = new {
                                     type = "object",
                                     properties = new { },
@@ -122,9 +150,20 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
 
                 var sessionUpdate = JsonSerializer.Serialize(sessionObject, new JsonSerializerOptions { WriteIndented = true });
                 _logger.LogInformation($"🔧 Updating AI session configuration");
+                _logger.LogInformation($"🎯 Voice Settings: {config.VoiceName} (azure-standard), Temperature={config.VoiceTemperature}");
                 _logger.LogDebug($"Session config: {sessionUpdate}");
 
-                return await SendMessageAsync(sessionUpdate);
+                var success = await SendMessageAsync(sessionUpdate);
+                if (success)
+                {
+                    _logger.LogInformation("✅ Session configuration sent successfully");
+                }
+                else
+                {
+                    _logger.LogError("❌ Failed to send session configuration");
+                }
+                
+                return success;
             }
             catch (Exception ex)
             {
@@ -147,7 +186,17 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                 var message = JsonSerializer.Serialize(responseObject, new JsonSerializerOptions { WriteIndented = true });
                 
                 _logger.LogInformation("🚀 Starting initial AI response");
-                return await SendMessageAsync(message);
+                var success = await SendMessageAsync(message);
+                if (success)
+                {
+                    _logger.LogInformation("✅ Initial response started successfully");
+                }
+                else
+                {
+                    _logger.LogError("❌ Failed to start initial response");
+                }
+                
+                return success;
             }
             catch (Exception ex)
             {
@@ -163,6 +212,12 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                 if (!IsConnected)
                 {
                     _logger.LogWarning("⚠️ Cannot send message - WebSocket not connected");
+                    return false;
+                }
+
+                if (string.IsNullOrWhiteSpace(message))
+                {
+                    _logger.LogWarning("⚠️ Cannot send empty message");
                     return false;
                 }
 
@@ -189,10 +244,11 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
             {
                 if (!IsConnected)
                 {
+                    _logger.LogWarning("⚠️ Cannot receive message - WebSocket not connected");
                     return null;
                 }
 
-                byte[] buffer = new byte[1024 * 8];
+                byte[] buffer = new byte[1024 * 16];
                 var receiveBuffer = new ArraySegment<byte>(buffer);
                 StringBuilder messageBuilder = new StringBuilder();
 
@@ -200,11 +256,33 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                 do
                 {
                     result = await _webSocket!.ReceiveAsync(receiveBuffer, cancellationToken);
-                    messageBuilder.Append(Encoding.UTF8.GetString(buffer, 0, result.Count));
+                    
+                    if (result.MessageType == WebSocketMessageType.Text)
+                    {
+                        var textReceived = Encoding.UTF8.GetString(buffer, 0, result.Count);
+                        messageBuilder.Append(textReceived);
+                    }
+                    else if (result.MessageType == WebSocketMessageType.Close)
+                    {
+                        _logger.LogWarning("🔚 WebSocket close message received");
+                        return null;
+                    }
+                    else if (result.MessageType == WebSocketMessageType.Binary)
+                    {
+                        _logger.LogDebug("📦 Binary message received, skipping...");
+                        continue;
+                    }
                 }
                 while (!result.EndOfMessage);
 
                 string receivedMessage = messageBuilder.ToString();
+                
+                if (string.IsNullOrWhiteSpace(receivedMessage))
+                {
+                    _logger.LogDebug("📭 Received empty message from WebSocket");
+                    return null;
+                }
+
                 _logger.LogDebug($"📥 Message received from AI: {receivedMessage.Length} chars");
                 
                 return receivedMessage;
@@ -223,8 +301,20 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                 if (_webSocket?.State == WebSocketState.Open)
                 {
                     _logger.LogInformation("🔗 Closing WebSocket connection");
-                    await _webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Normal", CancellationToken.None);
+                    
+                    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                    await _webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Session completed", cts.Token);
+                    
                     _logger.LogInformation("✅ WebSocket connection closed successfully");
+                }
+                else if (_webSocket?.State == WebSocketState.Connecting)
+                {
+                    _logger.LogInformation("🔗 Aborting connecting WebSocket");
+                    _webSocket.Abort();
+                }
+                else if (_webSocket != null)
+                {
+                    _logger.LogInformation($"🔗 WebSocket in state {_webSocket.State}, disposing...");
                 }
                 
                 _webSocket?.Dispose();
@@ -234,6 +324,8 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
             catch (Exception ex)
             {
                 _logger.LogError(ex, "❌ Error closing WebSocket connection");
+                _webSocket?.Dispose();
+                _webSocket = null;
                 return false;
             }
         }

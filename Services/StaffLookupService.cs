@@ -143,14 +143,29 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                         if (IsValidEmail(email))
                         {
                             var matchedName = ExtractNameFromRowKey(match.Entity.RowKey);
-                            _logger.LogInformation($"✅ [FuzzyMatch] Single department match found: '{matchedName}' for '{originalName}' in {department} (Score: {match.Score:F2}, Method: {match.MatchType})");
+                            
+                            // *** KEY CHANGE: Return confirmation needed instead of automatic authorization ***
+                            if (match.Score < 1.0) // Not perfect match
+                            {
+                                _logger.LogInformation($"❓ [FuzzyMatch] Fuzzy match found: '{matchedName}' for '{originalName}' in {department} (Score: {match.Score:F2}) - requesting confirmation");
+                                
+                                return new StaffLookupResult
+                                {
+                                    Status = StaffLookupStatus.ConfirmationNeeded,
+                                    Email = email,
+                                    RowKey = match.Entity.RowKey,
+                                    Message = $"confirm:{originalName}:{matchedName}:{department}:{match.Score:F2}"
+                                };
+                            }
+                            
+                            _logger.LogInformation($"✅ [FuzzyMatch] Perfect department match found: '{matchedName}' for '{originalName}' in {department}");
                             
                             return new StaffLookupResult
                             {
                                 Status = StaffLookupStatus.Authorized,
                                 Email = email,
                                 RowKey = match.Entity.RowKey,
-                                Message = $"Found staff member '{matchedName}' (fuzzy match with {match.Score:F2} confidence)"
+                                Message = $"Found staff member '{matchedName}'"
                             };
                         }
                     }
@@ -169,21 +184,42 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                     var bestMatch = matches[0];
                     
                     // Higher threshold when no department is specified
-                    if (bestMatch.Score > 0.85)
+                    if (bestMatch.Score >= 0.95) // Very high confidence for auto-approval without department
                     {
                         var email = GetEmailFromEntity(bestMatch.Entity);
                         
                         if (IsValidEmail(email))
                         {
                             var matchedName = ExtractNameFromRowKey(bestMatch.Entity.RowKey);
-                            _logger.LogInformation($"✅ [FuzzyMatch] High-confidence match found: '{matchedName}' for '{originalName}' (Score: {bestMatch.Score:F2}, Method: {bestMatch.MatchType})");
+                            _logger.LogInformation($"✅ [FuzzyMatch] Very high-confidence match found: '{matchedName}' for '{originalName}' (Score: {bestMatch.Score:F2}, Method: {bestMatch.MatchType})");
                             
                             return new StaffLookupResult
                             {
                                 Status = StaffLookupStatus.Authorized,
                                 Email = email,
                                 RowKey = bestMatch.Entity.RowKey,
-                                Message = $"Found staff member '{matchedName}' (fuzzy match with {bestMatch.Score:F2} confidence)"
+                                Message = $"Found staff member '{matchedName}'"
+                            };
+                        }
+                    }
+                    else if (bestMatch.Score > 0.75) // Good match but needs confirmation
+                    {
+                        var email = GetEmailFromEntity(bestMatch.Entity);
+                        
+                        if (IsValidEmail(email))
+                        {
+                            var matchedName = ExtractNameFromRowKey(bestMatch.Entity.RowKey);
+                            var department_from_entity = bestMatch.Entity.ContainsKey("Department") ? 
+                                bestMatch.Entity["Department"]?.ToString() : "Unknown";
+                                
+                            _logger.LogInformation($"❓ [FuzzyMatch] Good match found but needs confirmation: '{matchedName}' for '{originalName}' (Score: {bestMatch.Score:F2})");
+                            
+                            return new StaffLookupResult
+                            {
+                                Status = StaffLookupStatus.ConfirmationNeeded,
+                                Email = email,
+                                RowKey = bestMatch.Entity.RowKey,
+                                Message = $"confirm:{originalName}:{matchedName}:{department_from_entity}:{bestMatch.Score:F2}"
                             };
                         }
                     }
@@ -212,6 +248,36 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
             {
                 _logger.LogError(ex, $"🔴 Error during fuzzy matching for: {originalName}");
                 return new StaffLookupResult { Status = StaffLookupStatus.NotFound };
+            }
+        }
+
+        // NEW METHOD: Handle user confirmation for fuzzy matches
+        public async Task<StaffLookupResult> ConfirmFuzzyMatchAsync(string originalName, string confirmedName, string department)
+        {
+            try
+            {
+                _logger.LogInformation($"✅ [Confirmation] User confirmed: '{originalName}' -> '{confirmedName}' in {department}");
+                
+                // Now do exact lookup with confirmed name
+                var normalizedConfirmed = NormalizeName(confirmedName);
+                var result = await CheckWithDepartment(normalizedConfirmed, confirmedName, department);
+                
+                if (result.Status == StaffLookupStatus.Authorized)
+                {
+                    _logger.LogInformation($"✅ [Confirmation] Confirmed match authorized: {confirmedName}");
+                    result.Message = $"Confirmed and authorized: {confirmedName}";
+                }
+                
+                return result;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, $"🔴 Error confirming fuzzy match for: {originalName} -> {confirmedName}");
+                return new StaffLookupResult 
+                { 
+                    Status = StaffLookupStatus.NotFound,
+                    Message = "Error occurred during confirmation"
+                };
             }
         }
 

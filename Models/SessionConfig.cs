@@ -7,9 +7,9 @@ namespace CallAutomation.AzureAI.VoiceLive.Models
         public double VoiceTemperature { get; set; } = 0.8;
         
         // Enhanced VAD settings for better speech recognition
-        public double VadThreshold { get; set; } = 0.4;  // Lowered from 0.5 for more sensitivity
-        public int PrefixPaddingMs { get; set; } = 300;  // Increased from 200ms for better speech capture
-        public int SilenceDurationMs { get; set; } = 500; // Increased from 200ms for better speech boundary detection
+        public double VadThreshold { get; set; } = 0.5;  // Lowered from 0.5 for more sensitivity
+        public int PrefixPaddingMs { get; set; } = 200;  // Increased from 200ms for better speech capture
+        public int SilenceDurationMs { get; set; } = 200; // Increased from 200ms for better speech boundary detection
         public bool RemoveFillerWords { get; set; } = true; // Changed to true to clean up transcription
         
         // Additional settings for better audio quality and speech recognition

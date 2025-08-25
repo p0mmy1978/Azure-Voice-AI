@@ -73,7 +73,7 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                     return false;
                 }
 
-                // Simplified session configuration - only using supported features
+                // Restored full session configuration with noise suppression and VAD
                 var sessionObject = new
                 {
                     type = "session.update",
@@ -81,46 +81,85 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                     {
                         instructions = config.Instructions,
                         
-                        // Basic voice configuration (your original working format)
+                        // RESTORED: Advanced Voice Activity Detection to handle background noise
+                        turn_detection = new
+                        {
+                            type = "azure_semantic_vad",
+                            threshold = config.VadThreshold,
+                            prefix_padding_ms = config.PrefixPaddingMs,
+                            silence_duration_ms = config.SilenceDurationMs,
+                            remove_filler_words = config.RemoveFillerWords
+                        },
+                        
+                        // RESTORED: Noise reduction for TV and background sounds
+                        input_audio_noise_reduction = new { type = "azure_deep_noise_suppression" },
+                        
+                        // RESTORED: Echo cancellation for better audio quality
+                        input_audio_echo_cancellation = new { type = "server_echo_cancellation" },
+                        
+                        // Basic voice configuration
                         voice = new
                         {
                             name = config.VoiceName,
                             type = "azure-standard",
                             temperature = config.VoiceTemperature
                         },
-                        
+
                         // Enhanced function tools
                         tools = new object[]
                         {
                             new {
                                 type = "function",
                                 name = "check_staff_exists",
-                                description = "Check if a staff member is authorized to receive messages. Include department if known. This function now supports advanced fuzzy matching for names that might be misheard by speech recognition (like 'Tock' vs 'Tops', 'Smith' vs 'Smyth', etc.).",
+                                description = "Check if a staff member is authorized to receive messages. This function now uses advanced fuzzy matching and may return a confirmation request if the name is not found exactly but a similar name exists.",
                                 parameters = new {
                                     type = "object",
                                     properties = new {
                                         name = new { 
                                             type = "string", 
-                                            description = "The name of the person to check. Will be fuzzy matched if not found exactly, so don't worry about minor spelling variations from speech recognition." 
+                                            description = "The name of the person to check. Will be fuzzy matched if not found exactly." 
                                         },
                                         department = new { 
                                             type = "string", 
-                                            description = "The department the person works in (optional but helps with accuracy when there are multiple people with similar names)" 
+                                            description = "The department the person works in (optional but helps with accuracy)" 
                                         }
                                     },
                                     required = new[] { "name" }
                                 }
                             },
                             new {
+                                type = "function", 
+                                name = "confirm_staff_match",
+                                description = "Confirm a fuzzy match suggestion when check_staff_exists returns a confirmation request. Only use this after asking the user to confirm.",
+                                parameters = new {
+                                    type = "object",
+                                    properties = new {
+                                        original_name = new {
+                                            type = "string",
+                                            description = "The original name the user said"
+                                        },
+                                        confirmed_name = new {
+                                            type = "string", 
+                                            description = "The name the user confirmed"
+                                        },
+                                        department = new {
+                                            type = "string",
+                                            description = "The department"
+                                        }
+                                    },
+                                    required = new[] { "original_name", "confirmed_name", "department" }
+                                }
+                            },
+                            new {
                                 type = "function",
-                                name = "send_message",
-                                description = "Send a message to a staff member after they have been verified as authorized through check_staff_exists.",
+                                name = "send_message", 
+                                description = "Send a message to a staff member after they have been verified as authorized.",
                                 parameters = new {
                                     type = "object",
                                     properties = new {
                                         name = new { 
                                             type = "string", 
-                                            description = "The exact name of the person to send the message to (use the name as confirmed by check_staff_exists)" 
+                                            description = "The exact name of the person to send the message to" 
                                         },
                                         message = new { 
                                             type = "string", 
@@ -128,7 +167,7 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                                         },
                                         department = new { 
                                             type = "string", 
-                                            description = "The department the person works in (optional but recommended for accuracy)" 
+                                            description = "The department the person works in (optional)" 
                                         }
                                     },
                                     required = new[] { "name", "message" }
@@ -137,26 +176,28 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                             new {
                                 type = "function",
                                 name = "end_call",
-                                description = "End the call gracefully after saying goodbye. Must be called after any goodbye message to properly terminate the conversation.",
+                                description = "End the call gracefully after saying goodbye.",
                                 parameters = new {
-                                    type = "object",
+                                    type = "object", 
                                     properties = new { },
                                     required = new string[] { }
                                 }
                             }
                         }
-                    }
-                };
+                    } // FIXED: Added missing closing brace here
+                }; // FIXED: Added missing semicolon here
 
                 var sessionUpdate = JsonSerializer.Serialize(sessionObject, new JsonSerializerOptions { WriteIndented = true });
-                _logger.LogInformation($"🔧 Updating AI session configuration");
+                _logger.LogInformation($"🔧 Updating AI session configuration with noise suppression");
                 _logger.LogInformation($"🎯 Voice Settings: {config.VoiceName} (azure-standard), Temperature={config.VoiceTemperature}");
+                _logger.LogInformation($"🔇 Noise Suppression: Azure Deep Noise Suppression enabled");
+                _logger.LogInformation($"🎤 VAD Settings: Threshold={config.VadThreshold}, Silence={config.SilenceDurationMs}ms, Padding={config.PrefixPaddingMs}ms");
                 _logger.LogDebug($"Session config: {sessionUpdate}");
 
                 var success = await SendMessageAsync(sessionUpdate);
                 if (success)
                 {
-                    _logger.LogInformation("✅ Session configuration sent successfully");
+                    _logger.LogInformation("✅ Session configuration with noise suppression sent successfully");
                 }
                 else
                 {

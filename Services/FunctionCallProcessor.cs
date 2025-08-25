@@ -29,6 +29,7 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                 return functionName switch
                 {
                     "check_staff_exists" => await HandleCheckStaffExists(arguments, callerId),
+                    "confirm_staff_match" => await HandleConfirmStaffMatch(arguments, callerId), // NEW
                     "send_message" => await HandleSendMessage(arguments, callerId),
                     "end_call" => HandleEndCall(),
                     _ => new FunctionCallResult
@@ -101,16 +102,18 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
 
                 var result = await _staffLookupService.CheckStaffExistsAsync(name!, department);
 
+                // Handle the new ConfirmationNeeded status
                 string output = result.Status switch
                 {
                     StaffLookupStatus.Authorized => "authorized",
-                    StaffLookupStatus.NotAuthorized => "not_authorized",
+                    StaffLookupStatus.NotAuthorized => "not_authorized", 
                     StaffLookupStatus.MultipleFound => "multiple_found",
                     StaffLookupStatus.NotFound => "not_authorized",
+                    StaffLookupStatus.ConfirmationNeeded => result.Message!, // Pass the confirmation message
                     _ => "not_authorized"
                 };
 
-                _logger.LogInformation($"🔍 Staff check result: {output}");
+                _logger.LogInformation($"🔍 Staff check result: {result.Status} -> output: {output}");
 
                 return new FunctionCallResult
                 {
@@ -121,6 +124,63 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
             catch (Exception ex)
             {
                 _logger.LogError(ex, "🔴 Error in HandleCheckStaffExists");
+                return new FunctionCallResult
+                {
+                    Success = false,
+                    Output = "error",
+                    ErrorMessage = ex.Message
+                };
+            }
+        }
+
+        // NEW METHOD: Handle user confirmation for fuzzy matches
+        private async Task<FunctionCallResult> HandleConfirmStaffMatch(string arguments, string callerId)
+        {
+            _logger.LogInformation($"✅ confirm_staff_match called with args: {arguments}");
+
+            try
+            {
+                var parsed = JsonDocument.Parse(arguments);
+                var originalName = parsed.RootElement.GetProperty("original_name").GetString();
+                var confirmedName = parsed.RootElement.GetProperty("confirmed_name").GetString();
+                var department = parsed.RootElement.GetProperty("department").GetString();
+
+                _logger.LogInformation($"✅ User confirmed: '{originalName}' -> '{confirmedName}' in {department}");
+
+                // Cast to concrete service to access the new confirmation method
+                if (_staffLookupService is StaffLookupService concreteService)
+                {
+                    var result = await concreteService.ConfirmFuzzyMatchAsync(originalName!, confirmedName!, department!);
+
+                    string output = result.Status switch
+                    {
+                        StaffLookupStatus.Authorized => "authorized",
+                        StaffLookupStatus.NotAuthorized => "not_authorized",
+                        _ => "error"
+                    };
+
+                    _logger.LogInformation($"✅ Confirmation result: {result.Status} -> output: {output}");
+
+                    return new FunctionCallResult
+                    {
+                        Success = true,
+                        Output = output
+                    };
+                }
+                else
+                {
+                    _logger.LogError("❌ StaffLookupService is not the concrete implementation");
+                    return new FunctionCallResult
+                    {
+                        Success = false,
+                        Output = "error",
+                        ErrorMessage = "Service implementation error"
+                    };
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "🔴 Error in HandleConfirmStaffMatch");
                 return new FunctionCallResult
                 {
                     Success = false,
@@ -208,3 +268,4 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
         }
     }
 }
+

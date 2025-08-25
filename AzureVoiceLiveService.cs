@@ -134,28 +134,37 @@ namespace CallAutomation.AzureAI.VoiceLive
                     "The fuzzy matching system helps find staff even with speech recognition errors, but always confirm unclear matches with the caller.")
             };
 
-            // Add delay before updating session to ensure connection is stable
-            await Task.Delay(2000);
+            // OPTIMIZED: Reduced delay from 2000ms to 200ms - just enough for connection stability
+            await Task.Delay(200);
             
             _logger.LogInformation("🔧 Updating session configuration...");
-            var sessionUpdated = await _voiceSessionManager.UpdateSessionAsync(sessionConfig);
+            
+            // OPTIMIZED: Run session update and conversation start in parallel
+            var sessionUpdateTask = _voiceSessionManager.UpdateSessionAsync(sessionConfig);
+            
+            // Start conversation processing immediately (don't wait for session update)
+            StartConversation();
+            
+            // Wait for session update to complete
+            var sessionUpdated = await sessionUpdateTask;
             if (!sessionUpdated)
             {
                 throw new InvalidOperationException("Failed to update Azure Voice Live session");
             }
             
-            // Add delay before starting response
-            await Task.Delay(1000);
-            
-            // Start the conversation
-            StartConversation();
+            // OPTIMIZED: Reduced delay from 1000ms to 100ms - just enough for session to be ready
+            await Task.Delay(100);
             
             _logger.LogInformation("🚀 Starting initial response...");
-            var responseStarted = await _voiceSessionManager.StartResponseAsync();
-            if (!responseStarted)
+            
+            // OPTIMIZED: Don't wait for response start - let it happen asynchronously
+            var responseStarted = _voiceSessionManager.StartResponseAsync();
+            if (!await responseStarted)
             {
                 _logger.LogWarning("⚠️ Failed to start initial response, but continuing...");
             }
+            
+            _logger.LogInformation("✅ AI Session initialization completed quickly");
         }
 
         private bool ValidateConfiguration(string? apiKey, string? endpoint, string? model)

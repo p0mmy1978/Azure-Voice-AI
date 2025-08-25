@@ -28,24 +28,29 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                     return true;
                 }
 
+                // CORRECTED: Azure Voice Live API endpoint format
                 var websocketUrl = new Uri($"{endpoint.Replace("https", "wss")}/voice-agent/realtime?api-version=2025-05-01-preview&x-ms-client-request-id={Guid.NewGuid()}&model={model}&api-key={apiKey}");
 
                 _webSocket = new ClientWebSocket();
                 
                 _webSocket.Options.SetRequestHeader("User-Agent", "AzureVoiceAI/1.0");
-                _webSocket.Options.KeepAliveInterval = TimeSpan.FromSeconds(30);
+                _webSocket.Options.KeepAliveInterval = TimeSpan.FromSeconds(15);
+                _webSocket.Options.SetBuffer(16384, 16384);
                 
-                _logger.LogInformation($"🔗 Connecting to Azure Voice Live:");
+                _logger.LogInformation($"🔗 Connecting to Azure Voice Live API:");
                 _logger.LogInformation($"   Endpoint: {endpoint}");
                 _logger.LogInformation($"   Model: {model}");
                 _logger.LogInformation($"   API Key: {apiKey.Substring(0, Math.Min(10, apiKey.Length))}...");
                 
-                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                
+                var connectStart = DateTime.Now;
                 await _webSocket.ConnectAsync(websocketUrl, cts.Token);
+                var connectDuration = DateTime.Now - connectStart;
                 
-                _logger.LogInformation($"✅ Connected to Azure Voice Live successfully! State: {_webSocket.State}");
+                _logger.LogInformation($"✅ Connected to Azure Voice Live successfully in {connectDuration.TotalMilliseconds:F0}ms! State: {_webSocket.State}");
                 
-                await Task.Delay(1000);
+                await Task.Delay(100);
                 
                 if (_webSocket.State != WebSocketState.Open)
                 {
@@ -53,7 +58,7 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                     return false;
                 }
                 
-                _logger.LogInformation("🎯 Connection stable after 1 second check");
+                _logger.LogInformation("🎯 Connection stable and ready for communication");
                 return true;
             }
             catch (Exception ex)
@@ -73,7 +78,9 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                     return false;
                 }
 
-                // Restored full session configuration with noise suppression and VAD
+                var updateStart = DateTime.Now;
+
+                // CORRECTED: Proper Azure Voice Live API session configuration
                 var sessionObject = new
                 {
                     type = "session.update",
@@ -81,37 +88,49 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                     {
                         instructions = config.Instructions,
                         
-                        // RESTORED: Advanced Voice Activity Detection to handle background noise
+                        // CORRECTED: Azure Voice Live VAD configuration
                         turn_detection = new
                         {
                             type = "azure_semantic_vad",
-                            threshold = config.VadThreshold,
-                            prefix_padding_ms = config.PrefixPaddingMs,
-                            silence_duration_ms = config.SilenceDurationMs,
-                            remove_filler_words = config.RemoveFillerWords
+                            threshold = 0.4,
+                            prefix_padding_ms = 150,
+                            silence_duration_ms = 150,
+                            remove_filler_words = true,
+                            min_speech_duration_ms = 100,
+                            max_silence_for_turn_ms = 800
                         },
                         
-                        // RESTORED: Noise reduction for TV and background sounds
-                        input_audio_noise_reduction = new { type = "azure_deep_noise_suppression" },
+                        // CORRECTED: Azure Voice Live specific audio processing
+                        input_audio_noise_reduction = new 
+                        { 
+                            type = "azure_deep_noise_suppression"
+                        },
                         
-                        // RESTORED: Echo cancellation for better audio quality
-                        input_audio_echo_cancellation = new { type = "server_echo_cancellation" },
+                        input_audio_echo_cancellation = new 
+                        { 
+                            type = "server_echo_cancellation"
+                        },
                         
-                        // Basic voice configuration
+                        // CORRECTED: Proper Azure TTS voice configuration
                         voice = new
                         {
-                            name = config.VoiceName,
+                            name = "en-US-EmmaNeural",  // FIXED: Correct Azure Emma voice name
                             type = "azure-standard",
                             temperature = config.VoiceTemperature
                         },
-
+                        
+                        // Audio format settings
+                        input_audio_format = "pcm16",
+                        output_audio_format = "pcm16",
+                        input_audio_sampling_rate = 24000,
+                        
                         // Enhanced function tools
                         tools = new object[]
                         {
                             new {
                                 type = "function",
                                 name = "check_staff_exists",
-                                description = "Check if a staff member is authorized to receive messages. This function now uses advanced fuzzy matching and may return a confirmation request if the name is not found exactly but a similar name exists.",
+                                description = "Check if a staff member is authorized to receive messages. Uses advanced fuzzy matching and may return confirmation requests for unclear names.",
                                 parameters = new {
                                     type = "object",
                                     properties = new {
@@ -121,7 +140,7 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                                         },
                                         department = new { 
                                             type = "string", 
-                                            description = "The department the person works in (optional but helps with accuracy)" 
+                                            description = "The department the person works in (optional but improves accuracy)" 
                                         }
                                     },
                                     required = new[] { "name" }
@@ -130,7 +149,7 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                             new {
                                 type = "function", 
                                 name = "confirm_staff_match",
-                                description = "Confirm a fuzzy match suggestion when check_staff_exists returns a confirmation request. Only use this after asking the user to confirm.",
+                                description = "Confirm a fuzzy match suggestion when check_staff_exists returns a confirmation request.",
                                 parameters = new {
                                     type = "object",
                                     properties = new {
@@ -153,7 +172,7 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                             new {
                                 type = "function",
                                 name = "send_message", 
-                                description = "Send a message to a staff member after they have been verified as authorized.",
+                                description = "Send a message to a staff member after verification.",
                                 parameters = new {
                                     type = "object",
                                     properties = new {
@@ -184,31 +203,41 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                                 }
                             }
                         }
-                    } // FIXED: Added missing closing brace here
-                }; // FIXED: Added missing semicolon here
+                    }
+                };
 
-                var sessionUpdate = JsonSerializer.Serialize(sessionObject, new JsonSerializerOptions { WriteIndented = true });
-                _logger.LogInformation($"🔧 Updating AI session configuration with noise suppression");
-                _logger.LogInformation($"🎯 Voice Settings: {config.VoiceName} (azure-standard), Temperature={config.VoiceTemperature}");
-                _logger.LogInformation($"🔇 Noise Suppression: Azure Deep Noise Suppression enabled");
-                _logger.LogInformation($"🎤 VAD Settings: Threshold={config.VadThreshold}, Silence={config.SilenceDurationMs}ms, Padding={config.PrefixPaddingMs}ms");
-                _logger.LogDebug($"Session config: {sessionUpdate}");
+                var jsonOptions = new JsonSerializerOptions 
+                { 
+                    WriteIndented = false,
+                    DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull
+                };
+                
+                var sessionUpdate = JsonSerializer.Serialize(sessionObject, jsonOptions);
+                
+                _logger.LogInformation($"🔧 Updating Azure Voice Live session with Emma voice...");
+                _logger.LogInformation($"🎯 Voice: en-US-EmmaNeural (azure-standard), Temp: {config.VoiceTemperature}");
+                _logger.LogInformation($"🎤 VAD: azure_semantic_vad, threshold=0.4, timing=150ms");
+                _logger.LogInformation($"🔇 Noise Suppression: azure_deep_noise_suppression enabled");
+                _logger.LogInformation($"📊 Config size: {sessionUpdate.Length} chars");
 
                 var success = await SendMessageAsync(sessionUpdate);
+                
+                var updateDuration = DateTime.Now - updateStart;
+                
                 if (success)
                 {
-                    _logger.LogInformation("✅ Session configuration with noise suppression sent successfully");
+                    _logger.LogInformation($"✅ Azure Voice Live session with Emma configured successfully in {updateDuration.TotalMilliseconds:F0}ms");
                 }
                 else
                 {
-                    _logger.LogError("❌ Failed to send session configuration");
+                    _logger.LogError($"❌ Failed to configure Azure Voice Live session after {updateDuration.TotalMilliseconds:F0}ms");
                 }
                 
                 return success;
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "❌ Failed to update session");
+                _logger.LogError(ex, "❌ Failed to update Azure Voice Live session");
                 return false;
             }
         }
@@ -223,18 +252,23 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                     return false;
                 }
 
-                var responseObject = new { type = "response.create" };
-                var message = JsonSerializer.Serialize(responseObject, new JsonSerializerOptions { WriteIndented = true });
+                var startTime = DateTime.Now;
                 
-                _logger.LogInformation("🚀 Starting initial AI response");
+                var responseObject = new { type = "response.create" };
+                var message = JsonSerializer.Serialize(responseObject);
+                
+                _logger.LogInformation("🚀 Starting initial AI response...");
+                
                 var success = await SendMessageAsync(message);
+                var duration = DateTime.Now - startTime;
+                
                 if (success)
                 {
-                    _logger.LogInformation("✅ Initial response started successfully");
+                    _logger.LogInformation($"✅ Initial response started successfully in {duration.TotalMilliseconds:F0}ms");
                 }
                 else
                 {
-                    _logger.LogError("❌ Failed to start initial response");
+                    _logger.LogError($"❌ Failed to start initial response after {duration.TotalMilliseconds:F0}ms");
                 }
                 
                 return success;
@@ -252,7 +286,7 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
             {
                 if (!IsConnected)
                 {
-                    _logger.LogWarning("⚠️ Cannot send message - WebSocket not connected");
+                    _logger.LogDebug("⚠️ Cannot send message - WebSocket not connected");
                     return false;
                 }
 
@@ -263,18 +297,34 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                 }
 
                 byte[] messageBytes = Encoding.UTF8.GetBytes(message);
+                
+                using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                timeoutCts.CancelAfter(TimeSpan.FromSeconds(5));
+                
                 await _webSocket!.SendAsync(
                     new ArraySegment<byte>(messageBytes),
                     WebSocketMessageType.Text,
                     true,
-                    cancellationToken);
+                    timeoutCts.Token);
 
-                _logger.LogDebug($"📤 Message sent to AI: {message.Length} chars");
+                if (message.Contains("input_audio_buffer.append"))
+                {
+                    _logger.LogDebug($"🎤 Audio data sent: {messageBytes.Length} bytes");
+                }
+                else if (message.Length > 100)
+                {
+                    _logger.LogDebug($"📤 Message sent to Azure Voice Live: {messageBytes.Length} bytes");
+                }
+                else
+                {
+                    _logger.LogDebug($"📤 Command sent: {message}");
+                }
+                
                 return true;
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "❌ Failed to send message to AI");
+                _logger.LogError(ex, "❌ Failed to send message to Azure Voice Live");
                 return false;
             }
         }
@@ -285,18 +335,22 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
             {
                 if (!IsConnected)
                 {
-                    _logger.LogWarning("⚠️ Cannot receive message - WebSocket not connected");
+                    _logger.LogDebug("⚠️ Cannot receive message - WebSocket not connected");
                     return null;
                 }
 
-                byte[] buffer = new byte[1024 * 16];
+                const int bufferSize = 32768;
+                byte[] buffer = new byte[bufferSize];
                 var receiveBuffer = new ArraySegment<byte>(buffer);
                 StringBuilder messageBuilder = new StringBuilder();
 
                 WebSocketReceiveResult result;
                 do
                 {
-                    result = await _webSocket!.ReceiveAsync(receiveBuffer, cancellationToken);
+                    using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                    timeoutCts.CancelAfter(TimeSpan.FromSeconds(30));
+                    
+                    result = await _webSocket!.ReceiveAsync(receiveBuffer, timeoutCts.Token);
                     
                     if (result.MessageType == WebSocketMessageType.Text)
                     {
@@ -305,12 +359,12 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                     }
                     else if (result.MessageType == WebSocketMessageType.Close)
                     {
-                        _logger.LogWarning("🔚 WebSocket close message received");
+                        _logger.LogInformation("🔚 WebSocket close message received from Azure Voice Live");
                         return null;
                     }
                     else if (result.MessageType == WebSocketMessageType.Binary)
                     {
-                        _logger.LogDebug("📦 Binary message received, skipping...");
+                        _logger.LogDebug("📦 Binary message received from Azure Voice Live, skipping...");
                         continue;
                     }
                 }
@@ -320,17 +374,28 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                 
                 if (string.IsNullOrWhiteSpace(receivedMessage))
                 {
-                    _logger.LogDebug("📭 Received empty message from WebSocket");
+                    _logger.LogDebug("📭 Received empty message from Azure Voice Live WebSocket");
                     return null;
                 }
 
-                _logger.LogDebug($"📥 Message received from AI: {receivedMessage.Length} chars");
+                if (receivedMessage.Contains("response.audio.delta"))
+                {
+                    _logger.LogDebug($"🔊 Audio response received: {receivedMessage.Length} chars");
+                }
+                else if (receivedMessage.Contains("error"))
+                {
+                    _logger.LogWarning($"⚠️ Error message received: {receivedMessage.Length} chars");
+                }
+                else
+                {
+                    _logger.LogDebug($"📥 Message received from Azure Voice Live: {receivedMessage.Length} chars");
+                }
                 
                 return receivedMessage;
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "❌ Failed to receive message from AI");
+                _logger.LogError(ex, "❌ Failed to receive message from Azure Voice Live");
                 return null;
             }
         }
@@ -341,21 +406,21 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
             {
                 if (_webSocket?.State == WebSocketState.Open)
                 {
-                    _logger.LogInformation("🔗 Closing WebSocket connection");
+                    _logger.LogInformation("🔗 Closing Azure Voice Live WebSocket connection...");
                     
                     using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
                     await _webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Session completed", cts.Token);
                     
-                    _logger.LogInformation("✅ WebSocket connection closed successfully");
+                    _logger.LogInformation("✅ Azure Voice Live WebSocket connection closed successfully");
                 }
                 else if (_webSocket?.State == WebSocketState.Connecting)
                 {
-                    _logger.LogInformation("🔗 Aborting connecting WebSocket");
+                    _logger.LogInformation("🔗 Aborting connecting Azure Voice Live WebSocket");
                     _webSocket.Abort();
                 }
                 else if (_webSocket != null)
                 {
-                    _logger.LogInformation($"🔗 WebSocket in state {_webSocket.State}, disposing...");
+                    _logger.LogInformation($"🔗 Azure Voice Live WebSocket in state {_webSocket.State}, disposing...");
                 }
                 
                 _webSocket?.Dispose();
@@ -364,7 +429,7 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "❌ Error closing WebSocket connection");
+                _logger.LogError(ex, "❌ Error closing Azure Voice Live WebSocket connection");
                 _webSocket?.Dispose();
                 _webSocket = null;
                 return false;

@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using CallAutomation.AzureAI.VoiceLive.Models;
 using CallAutomation.AzureAI.VoiceLive.Services.Interfaces;
+using CallAutomation.AzureAI.VoiceLive.Helpers;
 
 namespace CallAutomation.AzureAI.VoiceLive.Services
 {
@@ -80,13 +81,96 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
 
                 var updateStart = DateTime.Now;
 
-                // CORRECTED: Proper Azure Voice Live API session configuration
+                // Get time-based greetings
+                var greeting = TimeOfDayHelper.GetGreeting();
+                var farewell = TimeOfDayHelper.GetFarewell();
+                var timeOfDay = TimeOfDayHelper.GetTimeOfDay();
+
+                // FIXED: Enhanced session configuration with department preservation
                 var sessionObject = new
                 {
                     type = "session.update",
                     session = new
                     {
-                        instructions = config.Instructions,
+                        instructions = string.Join(" ",
+                            "You are the after-hours voice assistant for poms.tech.",
+                            $"Start with: '{greeting}! Welcome to poms.tech after hours message service, can I take a message for someone?'",
+                            
+                            // CRITICAL: Department preservation rules
+                            "DEPARTMENT PRESERVATION RULES:",
+                            "1. When check_staff_exists returns 'authorized' with a department specified, YOU MUST remember that department for the entire conversation with that person.",
+                            "2. When calling send_message, ALWAYS include the department that was used in the successful check_staff_exists call.",
+                            "3. NEVER call send_message without the department if a department was used during staff verification.",
+                            "4. Track the department context throughout the conversation - do not lose it between function calls.",
+                            
+                            "DETAILED WORKFLOW:",
+                            "Step 1: User asks to send message to [Name]",
+                            "Step 2: Call check_staff_exists with name (and department if user provided it)",
+                            "Step 3a: If result is 'authorized' - remember the department that was used and proceed to get message",
+                            "Step 3b: If result shows multiple departments available, ask user to specify department",
+                            "Step 4: If user specifies department, call check_staff_exists again with name AND department",
+                            "Step 5: When 'authorized', remember the EXACT department that made it authorized",
+                            "Step 6: Get message content from user",  
+                            "Step 7: Call send_message with name, message, AND the department that was authorized in steps 3a or 5",
+                            
+                            "CRITICAL EXAMPLES:",
+                            "EXAMPLE 1 - Department specified upfront:",
+                            "User: 'Send message to John Smith in Sales'",
+                            "You: [call check_staff_exists(name='John Smith', department='Sales')]",
+                            "System returns: 'authorized'",
+                            "You: 'Perfect! What message would you like me to send to John Smith in Sales?'",
+                            "User: 'Meeting moved to 10am'", 
+                            "You: [call send_message(name='John Smith', message='Meeting moved to 10am', department='Sales')]",
+                            
+                            "EXAMPLE 2 - Multiple matches need clarification:",
+                            "User: 'Send message to John Smith'",
+                            "You: [call check_staff_exists(name='John Smith')]",
+                            "System returns: 'Multiple staff members named John Smith found. Please specify which department: IT, Sales'",
+                            "You: 'I found multiple John Smith entries. Which department do you need - IT or Sales?'",
+                            "User: 'Sales please'",
+                            "You: [call check_staff_exists(name='John Smith', department='Sales')]",
+                            "System returns: 'authorized'",
+                            "You: 'Excellent! What message would you like me to send to John Smith in Sales?'",
+                            "User: 'Please call me back'",
+                            "You: [call send_message(name='John Smith', message='Please call me back', department='Sales')]",
+                            
+                            "EXAMPLE 3 - Wrong department correction:",
+                            "User: 'Send message to John Smith in Marketing'",
+                            "You: [call check_staff_exists(name='John Smith', department='Marketing')]", 
+                            "System returns: 'Multiple staff members named John Smith found. Please specify which department: IT, Sales'",
+                            "You: 'I couldn't find John Smith in Marketing, but I found John Smith in IT and Sales. Which one do you need?'",
+                            "User: 'IT'",
+                            "You: [call check_staff_exists(name='John Smith', department='IT')]",
+                            "System returns: 'authorized'",
+                            "You: 'Got it! What message would you like me to send to John Smith in IT?'",
+                            "User: 'Server maintenance tonight'",
+                            "You: [call send_message(name='John Smith', message='Server maintenance tonight', department='IT')]",
+                            
+                            "MEMORY RULE: Once a staff member is verified with a specific department, ALWAYS use that department in send_message.",
+                            "NEVER lose the department context between check_staff_exists and send_message function calls!",
+                            
+                            // Enhanced name handling with confirmation flow
+                            "NAME HANDLING RULES:",
+                            "1. When a caller provides a name, ALWAYS use the check_staff_exists function first.",
+                            "2. If check_staff_exists returns 'authorized', proceed with taking the message.",
+                            "3. If check_staff_exists returns 'not_authorized', politely ask the caller to spell the name or provide the department.",
+                            "4. If check_staff_exists returns a message starting with 'confirm:', parse it and ask for confirmation.",
+                            "5. Only proceed with message taking after getting 'authorized' from either check_staff_exists or confirm_staff_match.",
+                            
+                            // Message handling
+                            "MESSAGE HANDLING:",
+                            "1. After staff verification is successful, ask: 'What message would you like me to send to [Name] in [Department]?'",
+                            "2. Use send_message function with name, message, AND department.",
+                            "3. After sending successfully, say 'I have sent your message to [Name] in [Department]. Is there anything else I can help you with?'",
+                            
+                            // Call ending
+                            "CALL ENDING:",
+                            "1. If the caller says 'no', 'nothing else', 'that's all', 'goodbye', etc., say 'Thanks for calling poms.tech, {farewell}!' and use end_call.",
+                            "2. CRITICAL: Always call end_call after any goodbye message.",
+                            
+                            $"Remember it's currently {timeOfDay} time. Be patient with name clarifications as speech recognition can misinterpret names.",
+                            "The system helps find staff even with speech recognition errors, but always preserve department context between function calls.",
+                            "DEPARTMENT CONTEXT IS CRITICAL - Never call send_message without the department if one was used during verification!"),
                         
                         // CORRECTED: Azure Voice Live VAD configuration
                         turn_detection = new
@@ -124,13 +208,13 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                         output_audio_format = "pcm16",
                         input_audio_sampling_rate = 24000,
                         
-                        // Enhanced function tools
+                        // ENHANCED: Function tools with department preservation emphasis
                         tools = new object[]
                         {
                             new {
                                 type = "function",
                                 name = "check_staff_exists",
-                                description = "Check if a staff member is authorized to receive messages. Uses advanced fuzzy matching and may return confirmation requests for unclear names.",
+                                description = "Check if a staff member is authorized to receive messages. Returns 'authorized', 'not_authorized', or lists available departments for duplicates. Remember the department used when this returns 'authorized'.",
                                 parameters = new {
                                     type = "object",
                                     properties = new {
@@ -140,7 +224,7 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                                         },
                                         department = new { 
                                             type = "string", 
-                                            description = "The department the person works in (optional but improves accuracy)" 
+                                            description = "The department the person works in. REQUIRED when multiple people have the same name." 
                                         }
                                     },
                                     required = new[] { "name" }
@@ -172,13 +256,13 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                             new {
                                 type = "function",
                                 name = "send_message", 
-                                description = "Send a message to a staff member after verification.",
+                                description = "Send a message to a staff member after verification. CRITICAL: Must include the department if it was used during check_staff_exists verification.",
                                 parameters = new {
                                     type = "object",
                                     properties = new {
                                         name = new { 
                                             type = "string", 
-                                            description = "The exact name of the person to send the message to" 
+                                            description = "The exact name of the person to send the message to (must match the verified name)" 
                                         },
                                         message = new { 
                                             type = "string", 
@@ -186,7 +270,7 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                                         },
                                         department = new { 
                                             type = "string", 
-                                            description = "The department the person works in (optional)" 
+                                            description = "The department the person works in. REQUIRED if a department was used during check_staff_exists verification. This ensures the message goes to the correct person when there are multiple staff with the same name." 
                                         }
                                     },
                                     required = new[] { "name", "message" }
@@ -214,10 +298,11 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                 
                 var sessionUpdate = JsonSerializer.Serialize(sessionObject, jsonOptions);
                 
-                _logger.LogInformation($"🔧 Updating Azure Voice Live session with Emma voice...");
+                _logger.LogInformation($"🔧 Updating Azure Voice Live session with department preservation rules...");
                 _logger.LogInformation($"🎯 Voice: en-US-EmmaNeural (azure-standard), Temp: {config.VoiceTemperature}");
                 _logger.LogInformation($"🎤 VAD: azure_semantic_vad, threshold=0.4, timing=150ms");
                 _logger.LogInformation($"🔇 Noise Suppression: azure_deep_noise_suppression enabled");
+                _logger.LogInformation($"🏢 Department Context: Enhanced preservation rules enabled");
                 _logger.LogInformation($"📊 Config size: {sessionUpdate.Length} chars");
 
                 var success = await SendMessageAsync(sessionUpdate);
@@ -226,7 +311,7 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                 
                 if (success)
                 {
-                    _logger.LogInformation($"✅ Azure Voice Live session with Emma configured successfully in {updateDuration.TotalMilliseconds:F0}ms");
+                    _logger.LogInformation($"✅ Azure Voice Live session with department preservation configured successfully in {updateDuration.TotalMilliseconds:F0}ms");
                 }
                 else
                 {

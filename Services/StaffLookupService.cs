@@ -11,7 +11,7 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
         
         // Cache for recent successful lookups to avoid repeated table queries
         private readonly Dictionary<string, (string Email, string RowKey, DateTime CachedAt)> _recentLookups = new();
-        private readonly TimeSpan _cacheTimeout = TimeSpan.FromMinutes(1);
+        private readonly TimeSpan _cacheTimeout = TimeSpan.FromMinutes(10);
 
         public StaffLookupService(IConfiguration configuration, ILogger<StaffLookupService> logger)
         {

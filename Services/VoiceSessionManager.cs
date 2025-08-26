@@ -81,12 +81,14 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
 
                 var updateStart = DateTime.Now;
 
-                // Get time-based greetings
+                // Get time-based greetings - THIS IS THE KEY FIX
                 var greeting = TimeOfDayHelper.GetGreeting();
                 var farewell = TimeOfDayHelper.GetFarewell();
                 var timeOfDay = TimeOfDayHelper.GetTimeOfDay();
 
-                // FIXED: Enhanced session configuration with department preservation
+                _logger.LogInformation($"🕐 Setting up session with: greeting='{greeting}', farewell='{farewell}', timeOfDay='{timeOfDay}'");
+
+                // FIXED: Enhanced session configuration with ACTUAL farewell values embedded
                 var sessionObject = new
                 {
                     type = "session.update",
@@ -113,42 +115,6 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                             "Step 6: Get message content from user",  
                             "Step 7: Call send_message with name, message, AND the department that was authorized in steps 3a or 5",
                             
-                            "CRITICAL EXAMPLES:",
-                            "EXAMPLE 1 - Department specified upfront:",
-                            "User: 'Send message to John Smith in Sales'",
-                            "You: [call check_staff_exists(name='John Smith', department='Sales')]",
-                            "System returns: 'authorized'",
-                            "You: 'Perfect! What message would you like me to send to John Smith in Sales?'",
-                            "User: 'Meeting moved to 10am'", 
-                            "You: [call send_message(name='John Smith', message='Meeting moved to 10am', department='Sales')]",
-                            
-                            "EXAMPLE 2 - Multiple matches need clarification:",
-                            "User: 'Send message to John Smith'",
-                            "You: [call check_staff_exists(name='John Smith')]",
-                            "System returns: 'Multiple staff members named John Smith found. Please specify which department: IT, Sales'",
-                            "You: 'I found multiple John Smith entries. Which department do you need - IT or Sales?'",
-                            "User: 'Sales please'",
-                            "You: [call check_staff_exists(name='John Smith', department='Sales')]",
-                            "System returns: 'authorized'",
-                            "You: 'Excellent! What message would you like me to send to John Smith in Sales?'",
-                            "User: 'Please call me back'",
-                            "You: [call send_message(name='John Smith', message='Please call me back', department='Sales')]",
-                            
-                            "EXAMPLE 3 - Wrong department correction:",
-                            "User: 'Send message to John Smith in Marketing'",
-                            "You: [call check_staff_exists(name='John Smith', department='Marketing')]", 
-                            "System returns: 'Multiple staff members named John Smith found. Please specify which department: IT, Sales'",
-                            "You: 'I couldn't find John Smith in Marketing, but I found John Smith in IT and Sales. Which one do you need?'",
-                            "User: 'IT'",
-                            "You: [call check_staff_exists(name='John Smith', department='IT')]",
-                            "System returns: 'authorized'",
-                            "You: 'Got it! What message would you like me to send to John Smith in IT?'",
-                            "User: 'Server maintenance tonight'",
-                            "You: [call send_message(name='John Smith', message='Server maintenance tonight', department='IT')]",
-                            
-                            "MEMORY RULE: Once a staff member is verified with a specific department, ALWAYS use that department in send_message.",
-                            "NEVER lose the department context between check_staff_exists and send_message function calls!",
-                            
                             // Enhanced name handling with confirmation flow
                             "NAME HANDLING RULES:",
                             "1. When a caller provides a name, ALWAYS use the check_staff_exists function first.",
@@ -163,12 +129,27 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                             "2. Use send_message function with name, message, AND department.",
                             "3. After sending successfully, say 'I have sent your message to [Name] in [Department]. Is there anything else I can help you with?'",
                             
-                            // Call ending
-                            "CALL ENDING:",
-                            "1. If the caller says 'no', 'nothing else', 'that's all', 'goodbye', etc., say 'Thanks for calling poms.tech, {farewell}!' and use end_call.",
-                            "2. CRITICAL: Always call end_call after any goodbye message.",
+                            // FIXED: Call ending with ACTUAL time-of-day farewell embedded
+                            "CALL ENDING - CRITICAL FAREWELL INSTRUCTIONS:",
+                            $"1. When the caller says 'no', 'nothing else', 'that's all', 'goodbye', etc., you MUST say EXACTLY: 'Thanks for calling poms.tech, {farewell}!' and then use the end_call function.",
+                            $"2. The current time-appropriate farewell is: '{farewell}' - use this EXACT phrase.",
+                            $"3. Your mandatory goodbye message format: 'Thanks for calling poms.tech, {farewell}!'",
+                            "4. CRITICAL: Always call end_call immediately after saying the goodbye message.",
+                            $"5. FORBIDDEN: Never say 'goodbye' - always use the specific farewell: '{farewell}'",
+                            $"6. DOUBLE CHECK: The farewell phrase is '{farewell}' - memorize this and use it exactly.",
                             
-                            $"Remember it's currently {timeOfDay} time. Be patient with name clarifications as speech recognition can misinterpret names.",
+                            "CORRECT FAREWELL EXAMPLES (use these exact formats):",
+                            $"✅ CORRECT: 'Thanks for calling poms.tech, {farewell}!'",
+                            $"✅ CORRECT: 'Thank you for calling poms.tech, {farewell}!'", 
+                            $"✅ CORRECT: 'Thanks for using poms.tech after hours service, {farewell}!'",
+                            "❌ WRONG: 'Thanks for calling poms.tech, goodbye!'",
+                            "❌ WRONG: 'Thanks for calling, bye!'",
+                            "❌ WRONG: Any variation with 'goodbye', 'bye', 'farewell', or generic closings",
+                            
+                            $"MEMORY AID: Current farewell = '{farewell}'. Use this exact phrase every time.",
+                            $"TIME CONTEXT: It is currently {timeOfDay} time, so '{farewell}' is the appropriate closing.",
+                            
+                            $"Remember: greeting='{greeting}', farewell='{farewell}', time={timeOfDay}.",
                             "The system helps find staff even with speech recognition errors, but always preserve department context between function calls.",
                             "DEPARTMENT CONTEXT IS CRITICAL - Never call send_message without the department if one was used during verification!"),
                         
@@ -279,7 +260,7 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                             new {
                                 type = "function",
                                 name = "end_call",
-                                description = "End the call gracefully after saying goodbye.",
+                                description = $"End the call gracefully. This should only be called AFTER saying the goodbye message: 'Thanks for calling poms.tech, {farewell}!'",
                                 parameters = new {
                                     type = "object", 
                                     properties = new { },
@@ -298,11 +279,11 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                 
                 var sessionUpdate = JsonSerializer.Serialize(sessionObject, jsonOptions);
                 
-                _logger.LogInformation($"🔧 Updating Azure Voice Live session with department preservation rules...");
+                _logger.LogInformation($"🔧 Updating Azure Voice Live session with EMBEDDED time-of-day farewell...");
                 _logger.LogInformation($"🎯 Voice: en-US-EmmaNeural (azure-standard), Temp: {config.VoiceTemperature}");
                 _logger.LogInformation($"🎤 VAD: azure_semantic_vad, threshold=0.4, timing=150ms");
                 _logger.LogInformation($"🔇 Noise Suppression: azure_deep_noise_suppression enabled");
-                _logger.LogInformation($"🏢 Department Context: Enhanced preservation rules enabled");
+                _logger.LogInformation($"👋 Embedded farewell phrase: '{farewell}'");
                 _logger.LogInformation($"📊 Config size: {sessionUpdate.Length} chars");
 
                 var success = await SendMessageAsync(sessionUpdate);
@@ -311,7 +292,7 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                 
                 if (success)
                 {
-                    _logger.LogInformation($"✅ Azure Voice Live session with department preservation configured successfully in {updateDuration.TotalMilliseconds:F0}ms");
+                    _logger.LogInformation($"✅ Azure Voice Live session configured successfully in {updateDuration.TotalMilliseconds:F0}ms with farewell: '{farewell}'");
                 }
                 else
                 {

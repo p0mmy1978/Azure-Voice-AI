@@ -21,6 +21,12 @@ namespace CallAutomation.AzureAI.VoiceLive
         
         // Processing control
         private readonly CancellationTokenSource _cancellationTokenSource;
+        
+        // Session state management
+        private volatile bool _sessionReady = false;
+        private readonly object _sessionLock = new object();
+        private readonly Queue<byte[]> _pendingAudioBuffer = new Queue<byte[]>();
+        private const int MAX_PENDING_AUDIO_PACKETS = 100; // Limit buffered audio to prevent memory issues
 
         public AzureVoiceLiveService(
             AcsMediaStreamingHandler mediaStreaming, 
@@ -98,6 +104,19 @@ namespace CallAutomation.AzureAI.VoiceLive
                     throw new InvalidOperationException("Failed to update Azure Voice Live session");
                 }
 
+                // Wait a moment for session to be fully established
+                await Task.Delay(500);
+
+                // Mark session as ready BEFORE starting conversation processing
+                lock (_sessionLock)
+                {
+                    _sessionReady = true;
+                    _logger.LogInformation("✅ Session marked as ready - audio processing enabled");
+                }
+
+                // Process any buffered audio data
+                await ProcessPendingAudioAsync();
+
                 // Start conversation processing
                 _logger.LogInformation("💬 Starting conversation processing...");
                 StartConversationProcessing();
@@ -116,6 +135,51 @@ namespace CallAutomation.AzureAI.VoiceLive
             {
                 _logger.LogError(ex, "❌ AI session initialization failed");
                 throw;
+            }
+        }
+
+        private async Task ProcessPendingAudioAsync()
+        {
+            lock (_sessionLock)
+            {
+                if (_pendingAudioBuffer.Count > 0)
+                {
+                    _logger.LogInformation($"🎤 Processing {_pendingAudioBuffer.Count} buffered audio packets");
+                }
+            }
+
+            var processedCount = 0;
+            while (true)
+            {
+                byte[]? audioData;
+                lock (_sessionLock)
+                {
+                    if (_pendingAudioBuffer.Count == 0)
+                        break;
+                    audioData = _pendingAudioBuffer.Dequeue();
+                }
+
+                try
+                {
+                    await _audioStreamProcessor.SendAudioToExternalAIAsync(audioData, _voiceSessionManager.SendMessageAsync);
+                    processedCount++;
+                    
+                    // Small delay to avoid overwhelming the API
+                    if (processedCount % 10 == 0)
+                    {
+                        await Task.Delay(10);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "❌ Error processing buffered audio data");
+                    break;
+                }
+            }
+
+            if (processedCount > 0)
+            {
+                _logger.LogInformation($"✅ Processed {processedCount} buffered audio packets");
             }
         }
 
@@ -242,6 +306,29 @@ namespace CallAutomation.AzureAI.VoiceLive
         {
             try
             {
+                // Check if session is ready
+                lock (_sessionLock)
+                {
+                    if (!_sessionReady)
+                    {
+                        // Buffer audio data until session is ready
+                        if (_pendingAudioBuffer.Count < MAX_PENDING_AUDIO_PACKETS)
+                        {
+                            _pendingAudioBuffer.Enqueue(data);
+                            _logger.LogDebug($"🎤 Buffered audio packet (queue size: {_pendingAudioBuffer.Count})");
+                        }
+                        else
+                        {
+                            // Remove oldest packet to make room for new one
+                            _pendingAudioBuffer.Dequeue();
+                            _pendingAudioBuffer.Enqueue(data);
+                            _logger.LogDebug($"🎤 Buffered audio packet (queue full, replaced oldest)");
+                        }
+                        return;
+                    }
+                }
+
+                // Session is ready, process audio immediately
                 await _audioStreamProcessor.SendAudioToExternalAIAsync(data, _voiceSessionManager.SendMessageAsync);
             }
             catch (Exception ex)
@@ -255,6 +342,13 @@ namespace CallAutomation.AzureAI.VoiceLive
             try
             {
                 _logger.LogInformation("🛑 Closing AzureVoiceLiveService...");
+                
+                // Mark session as not ready
+                lock (_sessionLock)
+                {
+                    _sessionReady = false;
+                    _pendingAudioBuffer.Clear(); // Clear any pending audio
+                }
                 
                 _cancellationTokenSource.Cancel();
                 
@@ -274,13 +368,18 @@ namespace CallAutomation.AzureAI.VoiceLive
         /// <summary>
         /// Get service status for debugging
         /// </summary>
-        public (bool IsConnected, bool IsCallActive, bool IsEndingCall) GetServiceStatus()
+        public (bool IsConnected, bool IsCallActive, bool IsEndingCall, bool SessionReady, int BufferedPackets) GetServiceStatus()
         {
-            return (
-                _voiceSessionManager.IsConnected,
-                _callFlowManager.IsCallActive(),
-                _messageProcessor.IsEndingCall
-            );
+            lock (_sessionLock)
+            {
+                return (
+                    _voiceSessionManager.IsConnected,
+                    _callFlowManager.IsCallActive(),
+                    _messageProcessor.IsEndingCall,
+                    _sessionReady,
+                    _pendingAudioBuffer.Count
+                );
+            }
         }
     }
 }

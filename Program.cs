@@ -9,6 +9,8 @@ using System.ComponentModel.DataAnnotations;
 using CallAutomation.AzureAI.VoiceLive;
 using CallAutomation.AzureAI.VoiceLive.Services.Interfaces;
 using CallAutomation.AzureAI.VoiceLive.Services;
+using CallAutomation.AzureAI.VoiceLive.Services.Staff.Matching.StringSimilarity;
+using CallAutomation.AzureAI.VoiceLive.Services.Voice;
 
 // Configure Serilog with file rotation and size limits
 Log.Logger = new LoggerConfiguration()
@@ -31,13 +33,19 @@ ArgumentNullException.ThrowIfNullOrEmpty(acsConnectionString);
 //Call Automation Client
 var client = new CallAutomationClient(acsConnectionString);
 
-// Register new services for dependency injection
+// Register existing services for dependency injection
 builder.Services.AddScoped<IStaffLookupService, StaffLookupService>();
 builder.Services.AddScoped<IEmailService, EmailService>();
 builder.Services.AddScoped<ICallManagementService, CallManagementService>();
 builder.Services.AddScoped<IFunctionCallProcessor, FunctionCallProcessor>();
 builder.Services.AddScoped<IAudioStreamProcessor, AudioStreamProcessor>();
 builder.Services.AddScoped<IVoiceSessionManager, VoiceSessionManager>();
+
+// Register string similarity services
+builder.Services.AddScoped<CompositeSimilarityMatcher>();
+
+// Register voice configuration services
+builder.Services.AddScoped<SessionConfigBuilder>();
 
 var app = builder.Build();
 var appBaseUrl = builder.Configuration["AppBaseUrl"]?.TrimEnd('/');

@@ -47,6 +47,11 @@ builder.Services.AddScoped<CompositeSimilarityMatcher>();
 // Register voice configuration services
 builder.Services.AddScoped<SessionConfigBuilder>();
 
+// Register staff lookup support services
+builder.Services.AddScoped<CallAutomation.AzureAI.VoiceLive.Services.Staff.StaffCacheService>();
+builder.Services.AddScoped<CallAutomation.AzureAI.VoiceLive.Services.Staff.TableQueryService>();
+builder.Services.AddScoped<CallAutomation.AzureAI.VoiceLive.Services.Staff.FuzzyMatchingService>();
+
 var app = builder.Build();
 var appBaseUrl = builder.Configuration["AppBaseUrl"]?.TrimEnd('/');
 

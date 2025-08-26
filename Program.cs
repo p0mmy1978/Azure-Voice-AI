@@ -52,6 +52,8 @@ builder.Services.AddScoped<CallAutomation.AzureAI.VoiceLive.Services.Staff.Staff
 builder.Services.AddScoped<CallAutomation.AzureAI.VoiceLive.Services.Staff.TableQueryService>();
 builder.Services.AddScoped<CallAutomation.AzureAI.VoiceLive.Services.Staff.FuzzyMatchingService>();
 
+// DO NOT register MessageProcessor and CallFlowManager - they are manually created with specific callerId
+
 var app = builder.Build();
 var appBaseUrl = builder.Configuration["AppBaseUrl"]?.TrimEnd('/');
 
@@ -136,12 +138,12 @@ app.MapPost("/api/callbacks/{contextId}", async (
         if (@event is CallConnected callConnectedEvent)
         {
             activeCallConnections[contextId] = callConnectedEvent.CallConnectionId;
-            logger.LogInformation($"📞 Call connected - storing CallConnectionId: {callConnectedEvent.CallConnectionId} for context: {contextId}");
+            logger.LogInformation($"Call connected - storing CallConnectionId: {callConnectedEvent.CallConnectionId} for context: {contextId}");
         }
         else if (@event is CallDisconnected callDisconnectedEvent)
         {
             activeCallConnections.Remove(contextId);
-            logger.LogInformation($"📞 Call disconnected - removed CallConnectionId for context: {contextId}");
+            logger.LogInformation($"Call disconnected - removed CallConnectionId for context: {contextId}");
         }
     }
 

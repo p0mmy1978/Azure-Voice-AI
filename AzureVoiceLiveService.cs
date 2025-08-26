@@ -1,27 +1,26 @@
-using System.Text.Json;
 using Azure.Communication.CallAutomation;
 using CallAutomation.AzureAI.VoiceLive.Models;
 using CallAutomation.AzureAI.VoiceLive.Services.Interfaces;
+using CallAutomation.AzureAI.VoiceLive.Services.Voice;
 using CallAutomation.AzureAI.VoiceLive.Helpers;
 
 namespace CallAutomation.AzureAI.VoiceLive
 {
     public class AzureVoiceLiveService
     {
-        private CancellationTokenSource m_cts;
-        private AcsMediaStreamingHandler m_mediaStreaming;
-        private readonly IConfiguration m_configuration;
+        private readonly AcsMediaStreamingHandler _mediaStreaming;
+        private readonly IConfiguration _configuration;
         private readonly ILogger<AzureVoiceLiveService> _logger;
-        private bool m_isEndingCall = false;
-        private readonly string m_callerId;
-        private DateTime m_goodbyeStartTime;
-        private bool m_goodbyeMessageStarted = false;
+        private readonly string _callerId;
         
-        // Services
+        // Core services
         private readonly IVoiceSessionManager _voiceSessionManager;
-        private readonly ICallManagementService _callManagementService;
-        private readonly IFunctionCallProcessor _functionCallProcessor;
         private readonly IAudioStreamProcessor _audioStreamProcessor;
+        private readonly MessageProcessor _messageProcessor;
+        private readonly CallFlowManager _callFlowManager;
+        
+        // Processing control
+        private readonly CancellationTokenSource _cancellationTokenSource;
 
         public AzureVoiceLiveService(
             AcsMediaStreamingHandler mediaStreaming, 
@@ -35,201 +34,125 @@ namespace CallAutomation.AzureAI.VoiceLive
             ICallManagementService callManagementService,
             IFunctionCallProcessor functionCallProcessor,
             IAudioStreamProcessor audioStreamProcessor,
-            IVoiceSessionManager voiceSessionManager)
+            IVoiceSessionManager voiceSessionManager,
+            ILoggerFactory loggerFactory)
         {
-            m_mediaStreaming = mediaStreaming;
-            m_cts = new CancellationTokenSource();
-            m_configuration = configuration;
+            _mediaStreaming = mediaStreaming;
+            _configuration = configuration;
             _logger = logger;
-            m_callerId = callerId;
-            _callManagementService = callManagementService;
-            _functionCallProcessor = functionCallProcessor;
-            _audioStreamProcessor = audioStreamProcessor;
+            _callerId = callerId;
             _voiceSessionManager = voiceSessionManager;
+            _audioStreamProcessor = audioStreamProcessor;
+            _cancellationTokenSource = new CancellationTokenSource();
             
-            _logger.LogInformation($"🎯 AzureVoiceLiveService initialized with Caller ID: {m_callerId}");
+            _logger.LogInformation($"🎯 AzureVoiceLiveService initializing for: {_callerId}");
             
-            // Initialize services
-            _callManagementService.Initialize(callAutomationClient, activeCallConnections);
+            // Initialize call management
+            callManagementService.Initialize(callAutomationClient, activeCallConnections);
             
-            // Start the AI session
-            InitializeAISessionAsync().GetAwaiter().GetResult();
+            // Create specialized processors with correctly typed loggers
+            _messageProcessor = new MessageProcessor(
+                functionCallProcessor, 
+                audioStreamProcessor, 
+                voiceSessionManager, 
+                loggerFactory.CreateLogger<MessageProcessor>(), 
+                callerId);
+                
+            _callFlowManager = new CallFlowManager(
+                callManagementService,
+                voiceSessionManager,
+                loggerFactory.CreateLogger<CallFlowManager>(),
+                callerId);
+            
+            // Start the AI session initialization
+            _ = Task.Run(async () => await InitializeAISessionAsync());
         }
 
         private async Task InitializeAISessionAsync()
         {
-            var azureVoiceLiveApiKey = m_configuration.GetValue<string>("AzureVoiceLiveApiKey");
-            var azureVoiceLiveEndpoint = m_configuration.GetValue<string>("AzureVoiceLiveEndpoint");
-            var voiceLiveModel = m_configuration.GetValue<string>("VoiceLiveModel");
-            var systemPrompt = m_configuration.GetValue<string>("SystemPrompt") ?? "You are an AI assistant that helps people find information.";
-
-            // Validate configuration
-            if (!ValidateConfiguration(azureVoiceLiveApiKey, azureVoiceLiveEndpoint, voiceLiveModel))
+            try
             {
-                throw new InvalidOperationException("Invalid Azure Voice Live configuration");
+                _logger.LogInformation("🚀 Starting AI session initialization...");
+                
+                // Get configuration
+                var config = GetVoiceConfiguration();
+                if (!ValidateConfiguration(config.ApiKey, config.Endpoint, config.Model))
+                {
+                    throw new InvalidOperationException("Invalid Azure Voice Live configuration");
+                }
+
+                // Connect to Azure Voice Live
+                _logger.LogInformation("🔗 Connecting to Azure Voice Live...");
+                var connected = await _voiceSessionManager.ConnectAsync(config.Endpoint!, config.ApiKey!, config.Model!);
+                if (!connected)
+                {
+                    throw new InvalidOperationException("Failed to connect to Azure Voice Live");
+                }
+
+                // Configure session
+                _logger.LogInformation("🔧 Configuring AI session...");
+                var sessionConfig = CreateSessionConfig();
+                var sessionUpdated = await _voiceSessionManager.UpdateSessionAsync(sessionConfig);
+                if (!sessionUpdated)
+                {
+                    throw new InvalidOperationException("Failed to update Azure Voice Live session");
+                }
+
+                // Start conversation processing
+                _logger.LogInformation("💬 Starting conversation processing...");
+                StartConversationProcessing();
+                
+                // Start initial response
+                await Task.Delay(200); // Brief pause for stability
+                var responseStarted = await _voiceSessionManager.StartResponseAsync();
+                if (!responseStarted)
+                {
+                    _logger.LogWarning("⚠️ Failed to start initial response, but continuing...");
+                }
+                
+                _logger.LogInformation("✅ AI session initialization completed successfully");
             }
-
-            // Connect to Azure Voice Live
-            var connected = await _voiceSessionManager.ConnectAsync(azureVoiceLiveEndpoint!, azureVoiceLiveApiKey!, voiceLiveModel!);
-            if (!connected)
+            catch (Exception ex)
             {
-                throw new InvalidOperationException("Failed to connect to Azure Voice Live");
+                _logger.LogError(ex, "❌ AI session initialization failed");
+                throw;
             }
+        }
 
-            // Get time-based greetings
-            var greeting = TimeOfDayHelper.GetGreeting();
-            var farewell = TimeOfDayHelper.GetFarewell();
-            var timeOfDay = TimeOfDayHelper.GetTimeOfDay();
-
-            _logger.LogInformation($"🕐 Current time of day: {timeOfDay}, using greeting: '{greeting}', farewell: '{farewell}'");
-
-            // Enhanced session configuration with better name handling, confirmation flow, and FIXED time-of-day goodbye
-            var sessionConfig = new SessionConfig
-            {
-                Instructions = string.Join(" ",
-                    "You are the after-hours voice assistant for poms.tech.",
-                    $"Start with: '{greeting}! Welcome to poms.tech after hours message service, can I take a message for someone?'",
-                    
-                    // CRITICAL: Department preservation rules
-                    "DEPARTMENT PRESERVATION RULES:",
-                    "1. When check_staff_exists returns 'authorized' with a department specified, YOU MUST remember that department for the entire conversation with that person.",
-                    "2. When calling send_message, ALWAYS include the department that was used in the successful check_staff_exists call.",
-                    "3. NEVER call send_message without the department if a department was used during staff verification.",
-                    "4. Track the department context throughout the conversation - do not lose it between function calls.",
-                    
-                    "DETAILED WORKFLOW:",
-                    "Step 1: User asks to send message to [Name]",
-                    "Step 2: Call check_staff_exists with name (and department if user provided it)",
-                    "Step 3a: If result is 'authorized' - remember the department that was used and proceed to get message",
-                    "Step 3b: If result shows multiple departments available, ask user to specify department",
-                    "Step 4: If user specifies department, call check_staff_exists again with name AND department",
-                    "Step 5: When 'authorized', remember the EXACT department that made it authorized",
-                    "Step 6: Get message content from user",  
-                    "Step 7: Call send_message with name, message, AND the department that was authorized in steps 3a or 5",
-                    
-                    // Enhanced name handling with confirmation flow
-                    "NAME HANDLING RULES:",
-                    "1. When a caller provides a name, ALWAYS use the check_staff_exists function first.",
-                    "2. If check_staff_exists returns 'authorized', proceed with taking the message.",
-                    "3. If check_staff_exists returns 'not_authorized', politely ask the caller to:",
-                    "   - Spell the person's last name clearly",
-                    "   - Confirm the pronunciation",
-                    "   - Provide the department the person works in",
-                    "   Then call check_staff_exists again with the clarified information.",
-                    
-                    // NEW: Handle confirmation requests from fuzzy matching
-                    "4. If check_staff_exists returns a message starting with 'confirm:', this means the system found a similar name but needs confirmation.",
-                    "   - Parse the response format: 'confirm:originalName:suggestedName:department:confidence'",
-                    "   - Say: 'I couldn't find [originalName] exactly, but I did find [suggestedName] in [department]. Did you mean [suggestedName]?'",
-                    "   - Wait for the caller's response (yes/no).",
-                    "   - If they say YES: call confirm_staff_match with the original name, suggested name, and department.",
-                    "   - If they say NO: ask them to spell the name or try again.",
-                    
-                    "5. Only proceed with message taking after getting 'authorized' from either check_staff_exists or confirm_staff_match.",
-                    "6. If multiple attempts fail, politely say the person couldn't be found and ask them to call during business hours.",
-                    
-                    // Message handling
-                    "7. When authorized, prompt for the message and use send_message function.",
-                    "8. After sending successfully, say 'I have sent your message to [name]. Is there anything else I can help you with?'",
-                    
-                    // FIXED: Call ending with proper time-of-day farewell
-                    "CALL ENDING - CRITICAL INSTRUCTIONS:",
-                    $"9. If the caller says 'no', 'nothing else', 'that's all', 'goodbye', etc., say EXACTLY: 'Thanks for calling poms.tech, {farewell}!' and use end_call.",
-                    $"10. The farewell phrase is '{farewell}' - use this EXACT phrase, not 'goodbye'.",
-                    $"11. Your goodbye message template: 'Thanks for calling poms.tech, {farewell}!'",
-                    "12. CRITICAL: Always call end_call after saying the goodbye message.",
-                    $"13. NEVER say just 'goodbye' - always use the time-appropriate farewell: '{farewell}'",
-                    
-                    "EXAMPLES OF CORRECT GOODBYE:",
-                    $"- 'Thanks for calling poms.tech, {farewell}!'",
-                    $"- 'Thank you for calling poms.tech, {farewell}!'", 
-                    $"- 'Thanks for using poms.tech after hours service, {farewell}!'",
-                    "NEVER just say 'goodbye' or 'bye' - always use the specific farewell phrase provided.",
-                    
-                    // Examples of the new confirmation flow
-                    "EXAMPLE CONFIRMATION FLOW:",
-                    "User: 'I need to leave a message for Terry Tock'",
-                    "You: [call check_staff_exists with name='Terry Tock']",
-                    "System returns: 'confirm:Terry Tock:Terry Tops:IT:0.78'",
-                    "You: 'I couldn't find Terry Tock exactly, but I found Terry Tops in IT. Did you mean Terry Tops?'",
-                    "User: 'Yes, that's right'",
-                    "You: [call confirm_staff_match with original_name='Terry Tock', confirmed_name='Terry Tops', department='IT']",
-                    "System returns: 'authorized'",
-                    "You: 'Great! What message would you like me to send to Terry Tops?'",
-                    
-                    $"Remember it's currently {timeOfDay} time, so use '{farewell}' when ending calls.",
-                    "Be patient with name clarifications as speech recognition can misinterpret names.",
-                    "The fuzzy matching system helps find staff even with speech recognition errors, but always confirm unclear matches with the caller.",
-                    "DEPARTMENT CONTEXT IS CRITICAL - Never call send_message without the department if one was used during verification!",
-                    $"TIME-OF-DAY AWARENESS: Current time is {timeOfDay}, greeting is '{greeting}', farewell is '{farewell}'")
-            };
-
-            // OPTIMIZED: Reduced delay from 2000ms to 200ms - just enough for connection stability
-            await Task.Delay(200);
-            
-            _logger.LogInformation("🔧 Updating session configuration...");
-            
-            // OPTIMIZED: Run session update and conversation start in parallel
-            var sessionUpdateTask = _voiceSessionManager.UpdateSessionAsync(sessionConfig);
-            
-            // Start conversation processing immediately (don't wait for session update)
-            StartConversation();
-            
-            // Wait for session update to complete
-            var sessionUpdated = await sessionUpdateTask;
-            if (!sessionUpdated)
-            {
-                throw new InvalidOperationException("Failed to update Azure Voice Live session");
-            }
-            
-            // OPTIMIZED: Reduced delay from 1000ms to 100ms - just enough for session to be ready
-            await Task.Delay(100);
-            
-            _logger.LogInformation("🚀 Starting initial response...");
-            
-            // OPTIMIZED: Don't wait for response start - let it happen asynchronously
-            var responseStarted = _voiceSessionManager.StartResponseAsync();
-            if (!await responseStarted)
-            {
-                _logger.LogWarning("⚠️ Failed to start initial response, but continuing...");
-            }
-            
-            _logger.LogInformation($"✅ AI Session initialization completed with time-of-day farewell: '{farewell}'");
+        private (string? ApiKey, string? Endpoint, string? Model) GetVoiceConfiguration()
+        {
+            return (
+                _configuration.GetValue<string>("AzureVoiceLiveApiKey"),
+                _configuration.GetValue<string>("AzureVoiceLiveEndpoint"),
+                _configuration.GetValue<string>("VoiceLiveModel")
+            );
         }
 
         private bool ValidateConfiguration(string? apiKey, string? endpoint, string? model)
         {
-            _logger.LogInformation("🔍 Validating Azure Voice Live configuration...");
+            _logger.LogInformation("🔍 Validating configuration...");
             
             var isValid = true;
             
             if (string.IsNullOrWhiteSpace(apiKey))
             {
-                _logger.LogError("❌ AzureVoiceLiveApiKey is missing or empty");
+                _logger.LogError("❌ AzureVoiceLiveApiKey is missing");
                 isValid = false;
-            }
-            else if (apiKey.Length < 32)
-            {
-                _logger.LogWarning("⚠️ AzureVoiceLiveApiKey seems too short (expected 32+ characters)");
             }
             else
             {
-                _logger.LogInformation($"✅ API Key: {apiKey.Substring(0, 8)}... ({apiKey.Length} chars)");
+                _logger.LogInformation($"✅ API Key: {apiKey.Substring(0, Math.Min(8, apiKey.Length))}... ({apiKey.Length} chars)");
             }
             
             if (string.IsNullOrWhiteSpace(endpoint))
             {
-                _logger.LogError("❌ AzureVoiceLiveEndpoint is missing or empty");
+                _logger.LogError("❌ AzureVoiceLiveEndpoint is missing");
                 isValid = false;
             }
             else if (!endpoint.StartsWith("https://"))
             {
                 _logger.LogError("❌ AzureVoiceLiveEndpoint should start with https://");
                 isValid = false;
-            }
-            else if (!endpoint.Contains("cognitiveservices.azure.com"))
-            {
-                _logger.LogWarning("⚠️ AzureVoiceLiveEndpoint doesn't look like a standard Azure endpoint");
             }
             else
             {
@@ -238,267 +161,80 @@ namespace CallAutomation.AzureAI.VoiceLive
             
             if (string.IsNullOrWhiteSpace(model))
             {
-                _logger.LogError("❌ VoiceLiveModel is missing or empty");
+                _logger.LogError("❌ VoiceLiveModel is missing");
                 isValid = false;
-            }
-            else if (!model.Contains("gpt-4") && !model.Contains("realtime"))
-            {
-                _logger.LogWarning($"⚠️ VoiceLiveModel '{model}' doesn't look like a realtime model");
             }
             else
             {
                 _logger.LogInformation($"✅ Model: {model}");
             }
             
-            // Check for common configuration issues
-            if (apiKey != null && endpoint != null)
-            {
-                var endpointHost = new Uri(endpoint).Host;
-                if (apiKey.Contains(endpointHost.Split('.')[0]))
-                {
-                    _logger.LogWarning("⚠️ API Key appears to contain endpoint information - check your configuration");
-                }
-            }
-            
-            if (!isValid)
-            {
-                _logger.LogError("❌ Configuration validation failed. Please check your appsettings.json:");
-                _logger.LogError("   Required: AzureVoiceLiveApiKey, AzureVoiceLiveEndpoint, VoiceLiveModel");
-                _logger.LogError("   Example endpoint: https://your-resource.cognitiveservices.azure.com/");
-                _logger.LogError("   Example model: gpt-4o-mini-realtime-preview");
-            }
-            else
-            {
-                _logger.LogInformation("✅ Configuration validation passed");
-            }
-            
             return isValid;
         }
 
-        public void StartConversation()
+        private SessionConfig CreateSessionConfig()
         {
-            _ = Task.Run(async () => await ProcessMessagesAsync(m_cts.Token));
+            var greeting = TimeOfDayHelper.GetGreeting();
+            var farewell = TimeOfDayHelper.GetFarewell();
+            var timeOfDay = TimeOfDayHelper.GetTimeOfDay();
+
+            _logger.LogInformation($"🕐 Session config - Time: {timeOfDay}, Greeting: '{greeting}', Farewell: '{farewell}'");
+
+            return new SessionConfig
+            {
+                VoiceTemperature = 0.8,
+                Instructions = $"AI assistant for poms.tech after hours. Time: {timeOfDay}. Greeting: '{greeting}'. Farewell: '{farewell}'."
+            };
+        }
+
+        public void StartConversationProcessing()
+        {
+            _ = Task.Run(async () => await ProcessMessagesAsync(_cancellationTokenSource.Token));
         }
 
         private async Task ProcessMessagesAsync(CancellationToken cancellationToken)
         {
             try
             {
+                _logger.LogInformation("🔄 Starting message processing loop...");
+                
                 while (_voiceSessionManager.IsConnected && !cancellationToken.IsCancellationRequested)
                 {
                     var receivedMessage = await _voiceSessionManager.ReceiveMessageAsync(cancellationToken);
                     
-                    // Add null/empty check and logging
                     if (string.IsNullOrWhiteSpace(receivedMessage))
                     {
-                        _logger.LogDebug("📭 Received empty message, continuing...");
                         continue;
                     }
 
-                    _logger.LogInformation($"📥 Received: {receivedMessage}");
-
-                    // Add JSON validation before parsing
-                    JsonDocument? jsonDoc = null;
-                    try
+                    // Process the message using MessageProcessor
+                    var processed = await _messageProcessor.ProcessMessageAsync(receivedMessage, _mediaStreaming);
+                    
+                    // Check if call should end after processing
+                    if (_messageProcessor.IsEndingCall && processed)
                     {
-                        jsonDoc = JsonDocument.Parse(receivedMessage);
+                        _logger.LogInformation("📞 Message processor indicates call should end");
+                        await _callFlowManager.EndCallAsync();
+                        break;
                     }
-                    catch (JsonException jsonEx)
-                    {
-                        _logger.LogError(jsonEx, $"❌ Invalid JSON received: '{receivedMessage}'. Skipping message.");
-                        continue;
-                    }
-
-                    var root = jsonDoc.RootElement;
-
-                    if (root.TryGetProperty("type", out var typeElement))
-                    {
-                        var messageType = typeElement.GetString();
-                        
-                        _logger.LogDebug($"🔄 Processing message type: {messageType}");
-
-                        switch (messageType)
-                        {
-                            case "response.audio.delta":
-                                if (root.TryGetProperty("delta", out var deltaProperty))
-                                {
-                                    var delta = deltaProperty.GetString();
-                                    if (!string.IsNullOrEmpty(delta))
-                                    {
-                                        await _audioStreamProcessor.ProcessAudioDeltaAsync(delta, m_mediaStreaming);
-                                    }
-                                }
-                                break;
-
-                            case "input_audio_buffer.speech_started":
-                                await _audioStreamProcessor.HandleVoiceActivityAsync(true, m_mediaStreaming);
-                                break;
-
-                            case "response.function_call_arguments.done":
-                                await HandleFunctionCall(root);
-                                break;
-
-                            case "response.output_item.added":
-                                HandleOutputItem();
-                                break;
-
-                            case "response.done":
-                            case "response.audio.done":
-                                await HandleResponseCompletion();
-                                break;
-
-                            case "error":
-                                if (root.TryGetProperty("error", out var errorProperty))
-                                {
-                                    _logger.LogError($"❌ Azure Voice Live error: {errorProperty}");
-                                }
-                                break;
-
-                            case "session.created":
-                            case "session.updated":
-                            case "response.created":
-                            case "conversation.item.created":
-                            case "input_audio_buffer.speech_stopped":
-                            case "input_audio_buffer.committed":
-                                // These are status messages, log but don't process
-                                _logger.LogDebug($"ℹ️ Status message: {messageType}");
-                                break;
-
-                            default:
-                                _logger.LogDebug($"🔄 Unhandled message type: {messageType}");
-                                break;
-                        }
-                    }
-                    else
-                    {
-                        _logger.LogWarning($"⚠️ Message missing 'type' property: {receivedMessage}");
-                    }
-
-                    // Dispose the JSON document
-                    jsonDoc?.Dispose();
                 }
+                
+                _logger.LogInformation("🔄 Message processing loop ended");
             }
             catch (OperationCanceledException)
             {
-                _logger.LogInformation("🔚 ProcessMessagesAsync cancelled");
+                _logger.LogInformation("🛑 Message processing cancelled");
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "❌ Error processing messages");
+                _logger.LogError(ex, "❌ Error in message processing");
                 
                 // Try to reconnect if connection was lost
                 if (!_voiceSessionManager.IsConnected)
                 {
-                    _logger.LogWarning("🔗 WebSocket disconnected, attempting to close gracefully");
+                    _logger.LogWarning("🔗 Connection lost, attempting graceful close");
                     await Close();
                 }
-            }
-        }
-
-        private async Task HandleFunctionCall(JsonElement root)
-        {
-            try
-            {
-                var functionName = root.GetProperty("name").GetString();
-                var callId = root.GetProperty("call_id").GetString();
-                var args = root.GetProperty("arguments").ToString();
-                
-                _logger.LogInformation($"🔧 Function call: {functionName}, Call ID: {callId}");
-
-                var functionResult = await _functionCallProcessor.ProcessFunctionCallAsync(functionName!, args, callId!, m_callerId);
-                await _functionCallProcessor.SendFunctionResponseAsync(callId!, functionResult.Output, _voiceSessionManager.SendMessageAsync);
-                
-                if (functionResult.ShouldEndCall)
-                {
-                    m_isEndingCall = true;
-                    var farewell = TimeOfDayHelper.GetFarewell();
-                    _logger.LogInformation($"🔚 Call ending requested - will use farewell: '{farewell}'");
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "❌ Error handling function call");
-            }
-        }
-
-        private void HandleOutputItem()
-        {
-            try
-            {
-                if (m_isEndingCall && !m_goodbyeMessageStarted)
-                {
-                    m_goodbyeMessageStarted = true;
-                    m_goodbyeStartTime = DateTime.Now;
-                    var farewell = TimeOfDayHelper.GetFarewell();
-                    _logger.LogInformation($"🎤 Goodbye message started with time-appropriate farewell: '{farewell}'");
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "❌ Error handling output item");
-            }
-        }
-
-        private async Task HandleResponseCompletion()
-        {
-            try
-            {
-                if (m_isEndingCall)
-                {
-                    _logger.LogInformation("🔚 AI response completed - ending call");
-                    
-                    var delay = CalculateGoodbyeDelay();
-                    _logger.LogInformation($"⏱️ Waiting {delay}ms for goodbye to complete");
-                    
-                    await Task.Delay(delay);
-                    await EndCall();
-                    return;
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "❌ Error handling response completion");
-            }
-        }
-
-        private int CalculateGoodbyeDelay()
-        {
-            try
-            {
-                if (m_goodbyeMessageStarted)
-                {
-                    var elapsed = DateTime.Now - m_goodbyeStartTime;
-                    var estimatedDuration = TimeSpan.FromSeconds(5);
-                    var remaining = estimatedDuration - elapsed;
-                    
-                    return remaining.TotalMilliseconds > 0 
-                        ? (int)remaining.TotalMilliseconds + 1500 
-                        : 1000;
-                }
-                return 6000;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "❌ Error calculating goodbye delay");
-                return 3000; // Default fallback
-            }
-        }
-
-        private async Task EndCall()
-        {
-            try
-            {
-                var success = await _callManagementService.HangUpCallAsync(m_callerId);
-                if (!success)
-                {
-                    _logger.LogWarning($"⚠️ Failed to hang up call for: {m_callerId}");
-                }
-                await Close();
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "❌ Error ending call");
-                await Close(); // Ensure cleanup happens
             }
         }
 
@@ -518,11 +254,14 @@ namespace CallAutomation.AzureAI.VoiceLive
         {
             try
             {
-                _logger.LogInformation("🔚 Closing AzureVoiceLiveService...");
+                _logger.LogInformation("🛑 Closing AzureVoiceLiveService...");
                 
-                m_cts.Cancel();
-                m_cts.Dispose();
-                await _voiceSessionManager.CloseAsync();
+                _cancellationTokenSource.Cancel();
+                
+                // Use CallFlowManager for proper cleanup
+                await _callFlowManager.EndCallAsync();
+                
+                _cancellationTokenSource.Dispose();
                 
                 _logger.LogInformation("✅ AzureVoiceLiveService closed successfully");
             }
@@ -530,6 +269,18 @@ namespace CallAutomation.AzureAI.VoiceLive
             {
                 _logger.LogError(ex, "❌ Error closing AzureVoiceLiveService");
             }
+        }
+
+        /// <summary>
+        /// Get service status for debugging
+        /// </summary>
+        public (bool IsConnected, bool IsCallActive, bool IsEndingCall) GetServiceStatus()
+        {
+            return (
+                _voiceSessionManager.IsConnected,
+                _callFlowManager.IsCallActive(),
+                _messageProcessor.IsEndingCall
+            );
         }
     }
 }

@@ -53,6 +53,7 @@ public class AcsMediaStreamingHandler
         var functionCallProcessor = _serviceProvider.GetRequiredService<IFunctionCallProcessor>();
         var audioStreamProcessor = _serviceProvider.GetRequiredService<IAudioStreamProcessor>();
         var voiceSessionManager = _serviceProvider.GetRequiredService<IVoiceSessionManager>();
+        var loggerFactory = _serviceProvider.GetRequiredService<ILoggerFactory>();
         
         m_logger.LogInformation("🔧 All services resolved from DI container");
         
@@ -78,7 +79,8 @@ public class AcsMediaStreamingHandler
             callManagementService,
             functionCallProcessor,
             audioStreamProcessor,
-            voiceSessionManager);
+            voiceSessionManager,
+            loggerFactory);
 
         try
         {
@@ -110,7 +112,7 @@ public class AcsMediaStreamingHandler
         }
         finally
         {
-            m_logger.LogInformation("🔚 Cleaning up AcsMediaStreamingHandler...");
+            m_logger.LogInformation("🛑 Cleaning up AcsMediaStreamingHandler...");
             await m_aiServiceHandler.Close();
             this.Close();
             m_logger.LogInformation("✅ AcsMediaStreamingHandler cleanup completed");
@@ -131,7 +133,7 @@ public class AcsMediaStreamingHandler
                 // OPTIMIZED: Only log debug messages for audio data to reduce log spam
                 if (message.Contains("AudioData"))
                 {
-                    m_logger.LogDebug($"🔊 Audio data sent: {jsonBytes.Length} bytes");
+                    m_logger.LogDebug($"📊 Audio data sent: {jsonBytes.Length} bytes");
                 }
                 else
                 {
@@ -156,7 +158,7 @@ public class AcsMediaStreamingHandler
             if (m_webSocket?.State == WebSocketState.Open)
             {
                 await m_webSocket.CloseAsync(result.CloseStatus.Value, result.CloseStatusDescription, CancellationToken.None);
-                m_logger.LogInformation("🔚 WebSocket closed with received close status");
+                m_logger.LogInformation("🛑 WebSocket closed with received close status");
             }
         }
         catch (Exception ex)
@@ -172,7 +174,7 @@ public class AcsMediaStreamingHandler
             if (m_webSocket?.State == WebSocketState.Open)
             {
                 await m_webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Stream completed", CancellationToken.None);
-                m_logger.LogInformation("🔚 WebSocket closed normally");
+                m_logger.LogInformation("🛑 WebSocket closed normally");
             }
         }
         catch (Exception ex)
@@ -185,7 +187,7 @@ public class AcsMediaStreamingHandler
     {
         try
         {
-            m_logger.LogInformation("🔚 Closing AcsMediaStreamingHandler resources...");
+            m_logger.LogInformation("🛑 Closing AcsMediaStreamingHandler resources...");
             
             m_cts.Cancel();
             m_cts.Dispose();
@@ -252,7 +254,7 @@ public class AcsMediaStreamingHandler
 
                     if (receiveResult.MessageType == WebSocketMessageType.Close)
                     {
-                        m_logger.LogInformation("🔚 WebSocket close message received");
+                        m_logger.LogInformation("🛑 WebSocket close message received");
                         break;
                     }
                     
@@ -280,7 +282,7 @@ public class AcsMediaStreamingHandler
                 }
                 catch (OperationCanceledException)
                 {
-                    m_logger.LogInformation("🔚 WebSocket receiving cancelled");
+                    m_logger.LogInformation("🛑 WebSocket receiving cancelled");
                     break;
                 }
                 catch (WebSocketException wsEx) when (wsEx.WebSocketErrorCode == WebSocketError.ConnectionClosedPrematurely)
@@ -303,11 +305,11 @@ public class AcsMediaStreamingHandler
                 }
             }
             
-            m_logger.LogInformation($"🔚 Stopped receiving from ACS WebSocket. Final state: {m_webSocket.State}");
+            m_logger.LogInformation($"🛑 Stopped receiving from ACS WebSocket. Final state: {m_webSocket.State}");
         }
         catch (OperationCanceledException)
         {
-            m_logger.LogInformation("🔚 StartReceivingFromAcsMediaWebSocket cancelled");
+            m_logger.LogInformation("🛑 StartReceivingFromAcsMediaWebSocket cancelled");
         }
         catch (Exception ex)
         {

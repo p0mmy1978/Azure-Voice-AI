@@ -29,7 +29,7 @@ namespace CallAutomation.AzureAI.VoiceLive.Services.Voice
 
             _logger.LogInformation($"Building session with: greeting='{greeting}', farewell='{farewell}', timeOfDay='{timeOfDay}'");
 
-            return new
+            var sessionConfig = new
             {
                 type = "session.update",
                 session = new
@@ -45,6 +45,15 @@ namespace CallAutomation.AzureAI.VoiceLive.Services.Voice
                     tools = BuildTools(farewell)
                 }
             };
+
+            // Enhanced logging for audio enhancement verification
+            _logger.LogInformation("Audio Enhancement Settings:");
+            _logger.LogInformation("   Noise Reduction: azure_deep_noise_suppression");
+            _logger.LogInformation("   Echo Cancellation: server_echo_cancellation");
+            _logger.LogInformation("   Voice Activity Detection: azure_semantic_vad");
+            _logger.LogInformation("   Audio Format: pcm16 @ 24kHz");
+
+            return sessionConfig;
         }
 
         /// <summary>
@@ -359,7 +368,7 @@ namespace CallAutomation.AzureAI.VoiceLive.Services.Voice
             var farewell = TimeOfDayHelper.GetFarewell();
             var timeOfDay = TimeOfDayHelper.GetTimeOfDay();
 
-            return $"Voice: en-US-EmmaNeural | VAD: azure_semantic_vad | Time: {timeOfDay} | Greeting: '{greeting}' | Farewell: '{farewell}'";
+            return $"Voice: en-US-EmmaNeural | VAD: azure_semantic_vad | Noise: azure_deep_noise_suppression | Echo: server_echo_cancellation | Audio: pcm16@24kHz | Time: {timeOfDay} | Greeting: '{greeting}' | Farewell: '{farewell}'";
         }
     }
 }

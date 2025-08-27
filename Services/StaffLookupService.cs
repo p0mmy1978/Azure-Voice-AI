@@ -105,7 +105,8 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                             {
                                 Status = StaffLookupStatus.Authorized,
                                 Email = email,
-                                RowKey = entity.RowKey
+                                RowKey = entity.RowKey,
+                                SuggestedDepartment = department
                             };
                             _cache.CacheResult(name, department, result);
                             return email;
@@ -121,7 +122,19 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                     var email = TableQueryService.GetEmailFromEntity(matches[0]);
                     if (TableQueryService.IsValidEmail(email))
                     {
-                        _logger.LogInformation($"✅ [EmailLookup] Single match found: {name} -> {email}");
+                        // EXTRACT DEPARTMENT EVEN FOR SINGLE MATCHES
+                        var extractedDepartment = ExtractDepartmentFromEntity(matches[0]);
+                        
+                        var result = new StaffLookupResult
+                        {
+                            Status = StaffLookupStatus.Authorized,
+                            Email = email,
+                            RowKey = matches[0].RowKey,
+                            SuggestedDepartment = extractedDepartment
+                        };
+                        _cache.CacheResult(name, extractedDepartment, result);
+                        
+                        _logger.LogInformation($"✅ [EmailLookup] Single match found: {name} -> {email} in {extractedDepartment ?? "no department"}");
                         return email;
                     }
                 }
@@ -160,7 +173,8 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                             Status = StaffLookupStatus.Authorized,
                             Email = email,
                             RowKey = entity.RowKey,
-                            Message = $"Confirmed and authorized: {confirmedName}"
+                            Message = $"Confirmed and authorized: {confirmedName}",
+                            SuggestedDepartment = department
                         };
                     }
                 }
@@ -208,7 +222,8 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                     {
                         Status = StaffLookupStatus.Authorized,
                         Email = email,
-                        RowKey = entity.RowKey
+                        RowKey = entity.RowKey,
+                        SuggestedDepartment = department
                     };
                 }
                 else
@@ -247,12 +262,18 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                 var email = TableQueryService.GetEmailFromEntity(matches[0]);
                 if (TableQueryService.IsValidEmail(email))
                 {
-                    _logger.LogInformation($"✅ Single match authorized: {originalName}");
+                    // EXTRACT DEPARTMENT FROM THE SINGLE MATCH
+                    var department = ExtractDepartmentFromEntity(matches[0]);
+                    
+                    _logger.LogInformation($"✅ Single match authorized: {originalName} in {department ?? "no department"}");
                     return new StaffLookupResult
                     {
                         Status = StaffLookupStatus.Authorized,
                         Email = email,
-                        RowKey = matches[0].RowKey
+                        RowKey = matches[0].RowKey,
+                        SuggestedDepartment = department, // ADD THIS
+                        Message = $"Found staff member '{originalName}'" + 
+                                 (!string.IsNullOrWhiteSpace(department) ? $" in {department}" : "")
                     };
                 }
                 else
@@ -313,6 +334,31 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                 return firstValidEmail;
             }
 
+            return null;
+        }
+
+        /// <summary>
+        /// Extract department from table entity
+        /// </summary>
+        private string? ExtractDepartmentFromEntity(Azure.Data.Tables.TableEntity entity)
+        {
+            if (entity.ContainsKey("Department"))
+            {
+                return entity["Department"]?.ToString()?.Trim();
+            }
+
+            // Try to extract from RowKey if Department field is missing
+            // RowKey format: "name_department"
+            var rowKey = entity.RowKey;
+            var lastUnderscoreIndex = rowKey.LastIndexOf('_');
+            if (lastUnderscoreIndex > 0 && lastUnderscoreIndex < rowKey.Length - 1)
+            {
+                var departmentFromRowKey = rowKey.Substring(lastUnderscoreIndex + 1);
+                _logger.LogDebug($"🔍 [StaffLookup] Extracted department from RowKey: {departmentFromRowKey}");
+                return departmentFromRowKey;
+            }
+
+            _logger.LogDebug($"🔍 [StaffLookup] No department found for entity with RowKey: {rowKey}");
             return null;
         }
     }

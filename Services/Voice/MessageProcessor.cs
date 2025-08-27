@@ -16,10 +16,12 @@ namespace CallAutomation.AzureAI.VoiceLive.Services.Voice
         private readonly ILogger<MessageProcessor> _logger;
         private readonly string _callerId;
 
-        // Call ending state
+        // Call ending state with enhanced tracking
         private bool _isEndingCall = false;
         private bool _goodbyeMessageStarted = false;
+        private bool _farewellSent = false; // NEW: Track if farewell was actually sent
         private DateTime _goodbyeStartTime;
+        private DateTime _farewellTime; // NEW: Track when farewell was sent
 
         public MessageProcessor(
             IFunctionCallProcessor functionCallProcessor,
@@ -59,7 +61,7 @@ namespace CallAutomation.AzureAI.VoiceLive.Services.Voice
                 var root = jsonDoc.RootElement;
                 if (!root.TryGetProperty("type", out var typeElement))
                 {
-                    _logger.LogWarning($"⚠️ Message missing 'type' property");
+                    _logger.LogWarning("⚠️ Message missing 'type' property");
                     return false;
                 }
 
@@ -152,6 +154,14 @@ namespace CallAutomation.AzureAI.VoiceLive.Services.Voice
             try
             {
                 await _audioStreamProcessor.HandleVoiceActivityAsync(true, mediaStreaming);
+                
+                // ENHANCED: If user speaks after we've sent farewell, we should end the call immediately
+                if (_farewellSent)
+                {
+                    _logger.LogInformation("🔚 User spoke after farewell was sent - ending call immediately to prevent loop");
+                    _isEndingCall = true;
+                }
+                
                 return true;
             }
             catch (Exception ex)
@@ -179,6 +189,9 @@ namespace CallAutomation.AzureAI.VoiceLive.Services.Voice
                     _isEndingCall = true;
                     var farewell = TimeOfDayHelper.GetFarewell();
                     _logger.LogInformation($"🔚 Call ending requested - will use farewell: '{farewell}'");
+                    
+                    // ENHANCED: Set farewell time when end_call is triggered
+                    _farewellTime = DateTime.Now;
                 }
 
                 return true;
@@ -197,9 +210,11 @@ namespace CallAutomation.AzureAI.VoiceLive.Services.Voice
                 if (_isEndingCall && !_goodbyeMessageStarted)
                 {
                     _goodbyeMessageStarted = true;
+                    _farewellSent = true; // NEW: Track that farewell is being sent
+                    _farewellTime = DateTime.Now; // NEW: Record farewell time
                     _goodbyeStartTime = DateTime.Now;
                     var farewell = TimeOfDayHelper.GetFarewell();
-                    _logger.LogInformation($"🎤 Goodbye message started with farewell: '{farewell}'");
+                    _logger.LogInformation($"🎤 Goodbye message started with farewell: '{farewell}' - call should end soon");
                 }
                 return true;
             }
@@ -216,6 +231,15 @@ namespace CallAutomation.AzureAI.VoiceLive.Services.Voice
             {
                 if (_isEndingCall)
                 {
+                    // ENHANCED: If we've sent a farewell, end the call regardless of other conditions
+                    if (_farewellSent)
+                    {
+                        var timeSinceFarewell = DateTime.Now - _farewellTime;
+                        _logger.LogInformation($"🔚 AI farewell completed ({timeSinceFarewell.TotalMilliseconds:F0}ms ago) - ending call immediately");
+                        return true; // Signal to end call
+                    }
+                    
+                    // Fallback for cases where farewell tracking failed
                     _logger.LogInformation("🔚 AI response completed - ending call");
                     
                     var delay = CalculateGoodbyeDelay();
@@ -262,6 +286,21 @@ namespace CallAutomation.AzureAI.VoiceLive.Services.Voice
         {
             try
             {
+                // ENHANCED: If farewell was sent, use shorter delay
+                if (_farewellSent)
+                {
+                    var timeSinceFarewell = DateTime.Now - _farewellTime;
+                    var remainingTime = TimeSpan.FromSeconds(3) - timeSinceFarewell; // Shorter delay for farewell
+                    
+                    var delay = remainingTime.TotalMilliseconds > 0 
+                        ? (int)remainingTime.TotalMilliseconds + 500  // Add small buffer
+                        : 500; // Minimum delay
+                        
+                    _logger.LogDebug($"🔚 Calculated farewell delay: {delay}ms (time since farewell: {timeSinceFarewell.TotalMilliseconds:F0}ms)");
+                    return delay;
+                }
+                
+                // Original logic for other cases
                 if (_goodbyeMessageStarted)
                 {
                     var elapsed = DateTime.Now - _goodbyeStartTime;
@@ -272,12 +311,12 @@ namespace CallAutomation.AzureAI.VoiceLive.Services.Voice
                         ? (int)remaining.TotalMilliseconds + 1500 
                         : 1000;
                 }
-                return 6000;
+                return 6000; // Default fallback
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "❌ Error calculating goodbye delay");
-                return 3000; // Default fallback
+                return 1500; // Shorter default fallback to prevent long delays
             }
         }
 
@@ -288,16 +327,32 @@ namespace CallAutomation.AzureAI.VoiceLive.Services.Voice
         {
             _isEndingCall = false;
             _goodbyeMessageStarted = false;
+            _farewellSent = false; // NEW
             _goodbyeStartTime = default;
+            _farewellTime = default; // NEW
+            _logger.LogDebug("🔄 Call ending state reset");
         }
 
         /// <summary>
         /// Get current call state for debugging
         /// </summary>
-        public (bool IsEnding, bool GoodbyeStarted, TimeSpan ElapsedGoodbye) GetCallState()
+        public (bool IsEnding, bool GoodbyeStarted, bool FarewellSent, TimeSpan ElapsedGoodbye, TimeSpan ElapsedFarewell) GetCallState()
         {
-            var elapsed = _goodbyeMessageStarted ? DateTime.Now - _goodbyeStartTime : TimeSpan.Zero;
-            return (_isEndingCall, _goodbyeMessageStarted, elapsed);
+            var elapsedGoodbye = _goodbyeMessageStarted ? DateTime.Now - _goodbyeStartTime : TimeSpan.Zero;
+            var elapsedFarewell = _farewellSent ? DateTime.Now - _farewellTime : TimeSpan.Zero;
+            
+            return (_isEndingCall, _goodbyeMessageStarted, _farewellSent, elapsedGoodbye, elapsedFarewell);
+        }
+
+        /// <summary>
+        /// Force end call state for emergency situations
+        /// </summary>
+        public void ForceEndCall()
+        {
+            _isEndingCall = true;
+            _farewellSent = true;
+            _farewellTime = DateTime.Now;
+            _logger.LogWarning("⚠️ Force ending call - farewell bypass activated");
         }
     }
 }

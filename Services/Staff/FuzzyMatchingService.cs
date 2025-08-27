@@ -129,14 +129,14 @@ namespace CallAutomation.AzureAI.VoiceLive.Services.Staff
             // Very high confidence for auto-approval without department
             if (bestMatch.Score >= 0.95) 
             {
-                return CreateMatchResult(bestMatch, originalName, null, false);
+                var entityDepartment = ExtractDepartmentFromEntity(bestMatch.Entity);
+                return CreateMatchResult(bestMatch, originalName, entityDepartment, false);
             }
             // Good match but needs confirmation
             else if (bestMatch.Score > 0.75) 
             {
-                var department = bestMatch.Entity.ContainsKey("Department") ? 
-                    bestMatch.Entity["Department"]?.ToString() : "Unknown";
-                return CreateMatchResult(bestMatch, originalName, department, true);
+                var entityDepartment = ExtractDepartmentFromEntity(bestMatch.Entity);
+                return CreateMatchResult(bestMatch, originalName, entityDepartment, true);
             }
             // Multiple good matches - ask for department
             else if (matches.Count > 1 && matches.Take(2).All(m => m.Score > FuzzyMatchThreshold))
@@ -168,28 +168,62 @@ namespace CallAutomation.AzureAI.VoiceLive.Services.Staff
 
             var matchedName = NameNormalizer.ExtractNameFromRowKey(match.Entity.RowKey);
             
+            // Extract department from the entity if not provided
+            var entityDepartment = department ?? ExtractDepartmentFromEntity(match.Entity);
+            
             if (needsConfirmation)
             {
-                _logger.LogInformation($"❓ [FuzzyMatch] Match needs confirmation: '{matchedName}' for '{originalName}' (Score: {match.Score:F2})");
+                _logger.LogInformation($"❓ [FuzzyMatch] Match needs confirmation: '{matchedName}' for '{originalName}' (Score: {match.Score:F2}) in {entityDepartment}");
                 
                 return new StaffLookupResult
                 {
                     Status = StaffLookupStatus.ConfirmationNeeded,
                     Email = email,
                     RowKey = match.Entity.RowKey,
-                    Message = $"confirm:{originalName}:{matchedName}:{department}:{match.Score:F2}"
+                    Message = $"confirm:{originalName}:{matchedName}:{entityDepartment}:{match.Score:F2}",
+                    SuggestedName = matchedName,
+                    SuggestedDepartment = entityDepartment,
+                    ConfidenceScore = match.Score
                 };
             }
             
-            _logger.LogInformation($"✅ [FuzzyMatch] High-confidence match: '{matchedName}' for '{originalName}' (Score: {match.Score:F2}, Method: {match.MatchType})");
+            _logger.LogInformation($"✅ [FuzzyMatch] High-confidence match: '{matchedName}' for '{originalName}' (Score: {match.Score:F2}, Method: {match.MatchType}) in {entityDepartment}");
             
             return new StaffLookupResult
             {
                 Status = StaffLookupStatus.Authorized,
                 Email = email,
                 RowKey = match.Entity.RowKey,
-                Message = $"Found staff member '{matchedName}'"
+                Message = $"Found staff member '{matchedName}' in {entityDepartment}",
+                SuggestedName = matchedName,
+                SuggestedDepartment = entityDepartment,
+                ConfidenceScore = match.Score
             };
+        }
+
+        /// <summary>
+        /// Extract department from table entity
+        /// </summary>
+        private string? ExtractDepartmentFromEntity(TableEntity entity)
+        {
+            if (entity.ContainsKey("Department"))
+            {
+                return entity["Department"]?.ToString()?.Trim();
+            }
+
+            // Try to extract from RowKey if Department field is missing
+            // RowKey format: "name_department"
+            var rowKey = entity.RowKey;
+            var lastUnderscoreIndex = rowKey.LastIndexOf('_');
+            if (lastUnderscoreIndex > 0 && lastUnderscoreIndex < rowKey.Length - 1)
+            {
+                var departmentFromRowKey = rowKey.Substring(lastUnderscoreIndex + 1);
+                _logger.LogDebug($"🔍 [FuzzyMatch] Extracted department from RowKey: {departmentFromRowKey}");
+                return departmentFromRowKey;
+            }
+
+            _logger.LogDebug($"🔍 [FuzzyMatch] No department found for entity with RowKey: {rowKey}");
+            return null;
         }
     }
 }

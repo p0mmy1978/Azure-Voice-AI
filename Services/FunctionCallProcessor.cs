@@ -29,6 +29,7 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                 return functionName switch
                 {
                     "check_staff_exists" => await HandleCheckStaffExists(arguments, callerId),
+                    "confirm_staff_match" => await HandleConfirmStaffMatch(arguments, callerId),
                     "send_message" => await HandleSendMessage(arguments, callerId),
                     "end_call" => HandleEndCall(),
                     _ => new FunctionCallResult
@@ -101,16 +102,18 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
 
                 var result = await _staffLookupService.CheckStaffExistsAsync(name!, department);
 
+                // Enhanced output to include department information for authorized users
                 string output = result.Status switch
                 {
-                    StaffLookupStatus.Authorized => "authorized",
-                    StaffLookupStatus.NotAuthorized => "not_authorized",
-                    StaffLookupStatus.MultipleFound => "multiple_found",
+                    StaffLookupStatus.Authorized => CreateAuthorizedOutput(result, name!, department),
+                    StaffLookupStatus.NotAuthorized => "not_authorized", 
+                    StaffLookupStatus.MultipleFound => CreateMultipleFoundOutput(result),
                     StaffLookupStatus.NotFound => "not_authorized",
+                    StaffLookupStatus.ConfirmationNeeded => result.Message!, 
                     _ => "not_authorized"
                 };
 
-                _logger.LogInformation($"🔍 Staff check result: {output}");
+                _logger.LogInformation($"🔍 Staff check result: {result.Status} -> output: {output}");
 
                 return new FunctionCallResult
                 {
@@ -121,6 +124,85 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
             catch (Exception ex)
             {
                 _logger.LogError(ex, "🔴 Error in HandleCheckStaffExists");
+                return new FunctionCallResult
+                {
+                    Success = false,
+                    Output = "error",
+                    ErrorMessage = ex.Message
+                };
+            }
+        }
+
+        private string CreateAuthorizedOutput(StaffLookupResult result, string name, string? requestedDepartment)
+        {
+            // Priority: SuggestedDepartment from result, then requested department, then empty
+            var department = result.SuggestedDepartment ?? requestedDepartment ?? "";
+            
+            // Clean up department string
+            department = department?.Trim() ?? "";
+            
+            _logger.LogInformation($"🔍 Creating authorized output: name='{name}', department='{department}' (suggested: '{result.SuggestedDepartment}', requested: '{requestedDepartment}')");
+            
+            return $"authorized|{department}";
+        }
+
+        private string CreateMultipleFoundOutput(StaffLookupResult result)
+        {
+            if (result.AvailableDepartments.Any())
+            {
+                var departments = string.Join(", ", result.AvailableDepartments);
+                return $"multiple_found|{departments}";
+            }
+            return "multiple_found";
+        }
+
+        private async Task<FunctionCallResult> HandleConfirmStaffMatch(string arguments, string callerId)
+        {
+            _logger.LogInformation($"✅ confirm_staff_match called with args: {arguments}");
+
+            try
+            {
+                var parsed = JsonDocument.Parse(arguments);
+                var originalName = parsed.RootElement.GetProperty("original_name").GetString();
+                var confirmedName = parsed.RootElement.GetProperty("confirmed_name").GetString();
+                var department = parsed.RootElement.GetProperty("department").GetString();
+
+                _logger.LogInformation($"✅ User confirmed: '{originalName}' -> '{confirmedName}' in {department}");
+
+                // Cast to concrete service to access the new confirmation method
+                if (_staffLookupService is StaffLookupService concreteService)
+                {
+                    var result = await concreteService.ConfirmFuzzyMatchAsync(originalName!, confirmedName!, department!);
+
+                    string output = result.Status switch
+                    {
+                        StaffLookupStatus.Authorized => $"authorized|{department}",
+                        StaffLookupStatus.NotAuthorized => "not_authorized",
+                        _ => "error"
+                    };
+
+                    _logger.LogInformation($"✅ Confirmation result: {result.Status} -> output: {output}");
+
+                    return new FunctionCallResult
+                    {
+                        Success = true,
+                        Output = output
+                    };
+                }
+                else
+                {
+                    _logger.LogError("❌ StaffLookupService is not the concrete implementation");
+                    return new FunctionCallResult
+                    {
+                        Success = false,
+                        Output = "error",
+                        ErrorMessage = "Service implementation error"
+                    };
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "🔴 Error in HandleConfirmStaffMatch");
                 return new FunctionCallResult
                 {
                     Success = false,
@@ -144,6 +226,12 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
 
                 _logger.LogInformation($"📧 Parsed: name={name}, message={message}, department={department}");
 
+                // Log warning if department is missing (this helps debug the AI behavior)
+                if (string.IsNullOrWhiteSpace(department))
+                {
+                    _logger.LogWarning($"⚠️ send_message called without department for: {name}. This may cause lookup issues if there are multiple staff with the same name.");
+                }
+
                 // Get staff email using the lookup service
                 var email = await _staffLookupService.GetStaffEmailAsync(name!, department);
 
@@ -156,7 +244,8 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                     
                     if (emailSuccess)
                     {
-                        _logger.LogInformation($"✅ Email sent successfully to {name}");
+                        var deptInfo = !string.IsNullOrWhiteSpace(department) ? $" in {department}" : "";
+                        _logger.LogInformation($"✅ Email sent successfully to {name}{deptInfo}");
                         return new FunctionCallResult
                         {
                             Success = true,
@@ -175,7 +264,7 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                 }
                 else
                 {
-                    _logger.LogWarning($"❌ No valid email found for: {name}");
+                    _logger.LogWarning($"❌ No valid email found for: {name} (department: {department})");
                     return new FunctionCallResult
                     {
                         Success = false,

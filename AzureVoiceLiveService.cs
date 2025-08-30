@@ -1,27 +1,32 @@
-using System.Text.Json;
 using Azure.Communication.CallAutomation;
 using CallAutomation.AzureAI.VoiceLive.Models;
 using CallAutomation.AzureAI.VoiceLive.Services.Interfaces;
+using CallAutomation.AzureAI.VoiceLive.Services.Voice;
 using CallAutomation.AzureAI.VoiceLive.Helpers;
 
 namespace CallAutomation.AzureAI.VoiceLive
 {
     public class AzureVoiceLiveService
     {
-        private CancellationTokenSource m_cts;
-        private AcsMediaStreamingHandler m_mediaStreaming;
-        private readonly IConfiguration m_configuration;
+        private readonly AcsMediaStreamingHandler _mediaStreaming;
+        private readonly IConfiguration _configuration;
         private readonly ILogger<AzureVoiceLiveService> _logger;
-        private bool m_isEndingCall = false;
-        private readonly string m_callerId;
-        private DateTime m_goodbyeStartTime;
-        private bool m_goodbyeMessageStarted = false;
+        private readonly string _callerId;
         
-        // Services
+        // Core services
         private readonly IVoiceSessionManager _voiceSessionManager;
-        private readonly ICallManagementService _callManagementService;
-        private readonly IFunctionCallProcessor _functionCallProcessor;
         private readonly IAudioStreamProcessor _audioStreamProcessor;
+        private readonly MessageProcessor _messageProcessor;
+        private readonly CallFlowManager _callFlowManager;
+        
+        // Processing control
+        private readonly CancellationTokenSource _cancellationTokenSource;
+        
+        // Session state management
+        private volatile bool _sessionReady = false;
+        private readonly object _sessionLock = new object();
+        private readonly Queue<byte[]> _pendingAudioBuffer = new Queue<byte[]>();
+        private const int MAX_PENDING_AUDIO_PACKETS = 100; // Limit buffered audio to prevent memory issues
 
         public AzureVoiceLiveService(
             AcsMediaStreamingHandler mediaStreaming, 
@@ -35,217 +40,345 @@ namespace CallAutomation.AzureAI.VoiceLive
             ICallManagementService callManagementService,
             IFunctionCallProcessor functionCallProcessor,
             IAudioStreamProcessor audioStreamProcessor,
-            IVoiceSessionManager voiceSessionManager)
+            IVoiceSessionManager voiceSessionManager,
+            ILoggerFactory loggerFactory)
         {
-            m_mediaStreaming = mediaStreaming;
-            m_cts = new CancellationTokenSource();
-            m_configuration = configuration;
+            _mediaStreaming = mediaStreaming;
+            _configuration = configuration;
             _logger = logger;
-            m_callerId = callerId;
-            _callManagementService = callManagementService;
-            _functionCallProcessor = functionCallProcessor;
-            _audioStreamProcessor = audioStreamProcessor;
+            _callerId = callerId;
             _voiceSessionManager = voiceSessionManager;
+            _audioStreamProcessor = audioStreamProcessor;
+            _cancellationTokenSource = new CancellationTokenSource();
             
-            _logger.LogInformation($"🎯 AzureVoiceLiveService initialized with Caller ID: {m_callerId}");
+            _logger.LogInformation($"🎯 AzureVoiceLiveService initializing for: {_callerId}");
             
-            // Initialize services
-            _callManagementService.Initialize(callAutomationClient, activeCallConnections);
+            // Initialize call management
+            callManagementService.Initialize(callAutomationClient, activeCallConnections);
             
-            // Start the AI session
-            InitializeAISessionAsync().GetAwaiter().GetResult();
+            // Create specialized processors with correctly typed loggers
+            _messageProcessor = new MessageProcessor(
+                functionCallProcessor, 
+                audioStreamProcessor, 
+                voiceSessionManager, 
+                loggerFactory.CreateLogger<MessageProcessor>(), 
+                callerId);
+                
+            _callFlowManager = new CallFlowManager(
+                callManagementService,
+                voiceSessionManager,
+                loggerFactory.CreateLogger<CallFlowManager>(),
+                callerId);
+            
+            // Start the AI session initialization
+            _ = Task.Run(async () => await InitializeAISessionAsync());
         }
 
         private async Task InitializeAISessionAsync()
         {
-            var azureVoiceLiveApiKey = m_configuration.GetValue<string>("AzureVoiceLiveApiKey");
-            var azureVoiceLiveEndpoint = m_configuration.GetValue<string>("AzureVoiceLiveEndpoint");
-            var voiceLiveModel = m_configuration.GetValue<string>("VoiceLiveModel");
-            var systemPrompt = m_configuration.GetValue<string>("SystemPrompt") ?? "You are an AI assistant that helps people find information.";
-
-            // Connect to Azure Voice Live
-            var connected = await _voiceSessionManager.ConnectAsync(azureVoiceLiveEndpoint!, azureVoiceLiveApiKey!, voiceLiveModel!);
-            if (!connected)
+            try
             {
-                throw new InvalidOperationException("Failed to connect to Azure Voice Live");
+                _logger.LogInformation("🚀 Starting AI session initialization...");
+                
+                // Get configuration
+                var config = GetVoiceConfiguration();
+                if (!ValidateConfiguration(config.ApiKey, config.Endpoint, config.Model))
+                {
+                    throw new InvalidOperationException("Invalid Azure Voice Live configuration");
+                }
+
+                // Connect to Azure Voice Live
+                _logger.LogInformation("🔗 Connecting to Azure Voice Live...");
+                var connected = await _voiceSessionManager.ConnectAsync(config.Endpoint!, config.ApiKey!, config.Model!);
+                if (!connected)
+                {
+                    throw new InvalidOperationException("Failed to connect to Azure Voice Live");
+                }
+
+                // Configure session
+                _logger.LogInformation("🔧 Configuring AI session...");
+                var sessionConfig = CreateSessionConfig();
+                var sessionUpdated = await _voiceSessionManager.UpdateSessionAsync(sessionConfig);
+                if (!sessionUpdated)
+                {
+                    throw new InvalidOperationException("Failed to update Azure Voice Live session");
+                }
+
+                // Wait a moment for session to be fully established
+                await Task.Delay(500);
+
+                // Mark session as ready BEFORE starting conversation processing
+                lock (_sessionLock)
+                {
+                    _sessionReady = true;
+                    _logger.LogInformation("✅ Session marked as ready - audio processing enabled");
+                }
+
+                // Process any buffered audio data
+                await ProcessPendingAudioAsync();
+
+                // Start conversation processing
+                _logger.LogInformation("💬 Starting conversation processing...");
+                StartConversationProcessing();
+                
+                // Start initial response
+                await Task.Delay(200); // Brief pause for stability
+                var responseStarted = await _voiceSessionManager.StartResponseAsync();
+                if (!responseStarted)
+                {
+                    _logger.LogWarning("⚠️ Failed to start initial response, but continuing...");
+                }
+                
+                _logger.LogInformation("✅ AI session initialization completed successfully");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "❌ AI session initialization failed");
+                throw;
+            }
+        }
+
+        private async Task ProcessPendingAudioAsync()
+        {
+            lock (_sessionLock)
+            {
+                if (_pendingAudioBuffer.Count > 0)
+                {
+                    _logger.LogInformation($"🎤 Processing {_pendingAudioBuffer.Count} buffered audio packets");
+                }
             }
 
-            // Get time-based greetings
+            var processedCount = 0;
+            while (true)
+            {
+                byte[]? audioData;
+                lock (_sessionLock)
+                {
+                    if (_pendingAudioBuffer.Count == 0)
+                        break;
+                    audioData = _pendingAudioBuffer.Dequeue();
+                }
+
+                try
+                {
+                    await _audioStreamProcessor.SendAudioToExternalAIAsync(audioData, _voiceSessionManager.SendMessageAsync);
+                    processedCount++;
+                    
+                    // Small delay to avoid overwhelming the API
+                    if (processedCount % 10 == 0)
+                    {
+                        await Task.Delay(10);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "❌ Error processing buffered audio data");
+                    break;
+                }
+            }
+
+            if (processedCount > 0)
+            {
+                _logger.LogInformation($"✅ Processed {processedCount} buffered audio packets");
+            }
+        }
+
+        private (string? ApiKey, string? Endpoint, string? Model) GetVoiceConfiguration()
+        {
+            return (
+                _configuration.GetValue<string>("AzureVoiceLiveApiKey"),
+                _configuration.GetValue<string>("AzureVoiceLiveEndpoint"),
+                _configuration.GetValue<string>("VoiceLiveModel")
+            );
+        }
+
+        private bool ValidateConfiguration(string? apiKey, string? endpoint, string? model)
+        {
+            _logger.LogInformation("🔍 Validating configuration...");
+            
+            var isValid = true;
+            
+            if (string.IsNullOrWhiteSpace(apiKey))
+            {
+                _logger.LogError("❌ AzureVoiceLiveApiKey is missing");
+                isValid = false;
+            }
+            else
+            {
+                _logger.LogInformation($"✅ API Key: {apiKey.Substring(0, Math.Min(8, apiKey.Length))}... ({apiKey.Length} chars)");
+            }
+            
+            if (string.IsNullOrWhiteSpace(endpoint))
+            {
+                _logger.LogError("❌ AzureVoiceLiveEndpoint is missing");
+                isValid = false;
+            }
+            else if (!endpoint.StartsWith("https://"))
+            {
+                _logger.LogError("❌ AzureVoiceLiveEndpoint should start with https://");
+                isValid = false;
+            }
+            else
+            {
+                _logger.LogInformation($"✅ Endpoint: {endpoint}");
+            }
+            
+            if (string.IsNullOrWhiteSpace(model))
+            {
+                _logger.LogError("❌ VoiceLiveModel is missing");
+                isValid = false;
+            }
+            else
+            {
+                _logger.LogInformation($"✅ Model: {model}");
+            }
+            
+            return isValid;
+        }
+
+        private SessionConfig CreateSessionConfig()
+        {
             var greeting = TimeOfDayHelper.GetGreeting();
             var farewell = TimeOfDayHelper.GetFarewell();
             var timeOfDay = TimeOfDayHelper.GetTimeOfDay();
 
-            _logger.LogInformation($"🕐 Current time of day: {timeOfDay}, using greeting: '{greeting}', farewell: '{farewell}'");
+            _logger.LogInformation($"🕐 Session config - Time: {timeOfDay}, Greeting: '{greeting}', Farewell: '{farewell}'");
 
-            // Configure the session with time-aware prompts
-            var sessionConfig = new SessionConfig
+            return new SessionConfig
             {
-                Instructions = string.Join(" ",
-                    "You are the after-hours voice assistant for poms.tech.",
-                    $"Start with: '{greeting}! Welcome to poms.tech after hours message service, can I take a message for someone?'",
-                    "When a caller provides a name, always use the check_staff_exists function to verify if the person is an authorized staff member before proceeding.",
-                    "If the caller provides just a first and last name (like 'John Smith'), ask them to specify the department (Sales, IT, etc.) as there may be multiple people with the same name.",
-                    "If check_staff_exists returns 'authorized', prompt the caller for their message and use send_message.",
-                    "If check_staff_exists returns 'not_authorized', politely inform the caller that you can only take messages for authorized staff members and ask them to call back during business hours, then say 'Thanks for calling, have a great day!' and immediately use the end_call function.",
-                    "If check_staff_exists returns 'multiple_found', ask the caller to specify which department the person works in.",
-                    "After sending a message successfully, say 'I have sent your message to [name]. Is there anything else I can help you with?'",
-                    "If the caller says 'no', 'nothing else', 'that's all', 'goodbye', 'wrong number', or indicates they want to end the call, immediately say 'Thanks for calling poms.tech, [farewell]!' and then use the end_call function.",
-                    $"IMPORTANT: When ending calls, always use the farewell '{farewell}' instead of generic goodbyes.",
-                    "IMPORTANT: After saying any goodbye message, you MUST call the end_call function to properly end the conversation.",
-                    "Never end a conversation without calling the end_call function.",
-                    $"Remember it's currently {timeOfDay} time, so use appropriate time-based language throughout the conversation.")
+                VoiceTemperature = 0.8,
+                Instructions = $"AI assistant for poms.tech after hours. Time: {timeOfDay}. Greeting: '{greeting}'. Farewell: '{farewell}'."
             };
-
-            await _voiceSessionManager.UpdateSessionAsync(sessionConfig);
-            
-            // Start the conversation
-            StartConversation();
-            await _voiceSessionManager.StartResponseAsync();
         }
 
-        public void StartConversation()
+        public void StartConversationProcessing()
         {
-            _ = Task.Run(async () => await ProcessMessagesAsync(m_cts.Token));
+            _ = Task.Run(async () => await ProcessMessagesAsync(_cancellationTokenSource.Token));
         }
 
         private async Task ProcessMessagesAsync(CancellationToken cancellationToken)
         {
             try
             {
+                _logger.LogInformation("🔄 Starting message processing loop...");
+                
                 while (_voiceSessionManager.IsConnected && !cancellationToken.IsCancellationRequested)
                 {
                     var receivedMessage = await _voiceSessionManager.ReceiveMessageAsync(cancellationToken);
-                    if (receivedMessage == null) continue;
-
-                    _logger.LogInformation($"📥 Received: {receivedMessage}");
-
-                    var jsonDoc = JsonDocument.Parse(receivedMessage);
-                    var root = jsonDoc.RootElement;
-
-                    if (root.TryGetProperty("type", out var typeElement))
+                    
+                    if (string.IsNullOrWhiteSpace(receivedMessage))
                     {
-                        var messageType = typeElement.GetString();
+                        continue;
+                    }
 
-                        switch (messageType)
-                        {
-                            case "response.audio.delta":
-                                var delta = root.GetProperty("delta").GetString();
-                                await _audioStreamProcessor.ProcessAudioDeltaAsync(delta!, m_mediaStreaming);
-                                break;
-
-                            case "input_audio_buffer.speech_started":
-                                await _audioStreamProcessor.HandleVoiceActivityAsync(true, m_mediaStreaming);
-                                break;
-
-                            case "response.function_call_arguments.done":
-                                await HandleFunctionCall(root);
-                                break;
-
-                            case "response.output_item.added":
-                                HandleOutputItem();
-                                break;
-
-                            case "response.done":
-                            case "response.audio.done":
-                                await HandleResponseCompletion();
-                                break;
-                        }
+                    // Process the message using MessageProcessor
+                    var processed = await _messageProcessor.ProcessMessageAsync(receivedMessage, _mediaStreaming);
+                    
+                    // Check if call should end after processing
+                    if (_messageProcessor.IsEndingCall && processed)
+                    {
+                        _logger.LogInformation("📞 Message processor indicates call should end");
+                        await _callFlowManager.EndCallAsync();
+                        break;
                     }
                 }
+                
+                _logger.LogInformation("🔄 Message processing loop ended");
+            }
+            catch (OperationCanceledException)
+            {
+                _logger.LogInformation("🛑 Message processing cancelled");
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "❌ Error processing messages");
-            }
-        }
-
-        private async Task HandleFunctionCall(JsonElement root)
-        {
-            var functionName = root.GetProperty("name").GetString();
-            var callId = root.GetProperty("call_id").GetString();
-            var args = root.GetProperty("arguments").ToString();
-            
-            _logger.LogInformation($"🔧 Function call: {functionName}, Call ID: {callId}");
-
-            var functionResult = await _functionCallProcessor.ProcessFunctionCallAsync(functionName!, args, callId!, m_callerId);
-            await _functionCallProcessor.SendFunctionResponseAsync(callId!, functionResult.Output, _voiceSessionManager.SendMessageAsync);
-            
-            if (functionResult.ShouldEndCall)
-            {
-                m_isEndingCall = true;
-                var farewell = TimeOfDayHelper.GetFarewell();
-                _logger.LogInformation($"🔚 Call ending requested - will use farewell: '{farewell}'");
-            }
-        }
-
-        private void HandleOutputItem()
-        {
-            if (m_isEndingCall && !m_goodbyeMessageStarted)
-            {
-                m_goodbyeMessageStarted = true;
-                m_goodbyeStartTime = DateTime.Now;
-                var farewell = TimeOfDayHelper.GetFarewell();
-                _logger.LogInformation($"🎤 Goodbye message started with time-appropriate farewell: '{farewell}'");
-            }
-        }
-
-        private async Task HandleResponseCompletion()
-        {
-            if (m_isEndingCall)
-            {
-                _logger.LogInformation("🔚 AI response completed - ending call");
+                _logger.LogError(ex, "❌ Error in message processing");
                 
-                var delay = CalculateGoodbyeDelay();
-                _logger.LogInformation($"⏱️ Waiting {delay}ms for goodbye to complete");
-                
-                await Task.Delay(delay);
-                await EndCall();
-                return;
+                // Try to reconnect if connection was lost
+                if (!_voiceSessionManager.IsConnected)
+                {
+                    _logger.LogWarning("🔗 Connection lost, attempting graceful close");
+                    await Close();
+                }
             }
-        }
-
-        private int CalculateGoodbyeDelay()
-        {
-            if (m_goodbyeMessageStarted)
-            {
-                var elapsed = DateTime.Now - m_goodbyeStartTime;
-                var estimatedDuration = TimeSpan.FromSeconds(5);
-                var remaining = estimatedDuration - elapsed;
-                
-                return remaining.TotalMilliseconds > 0 
-                    ? (int)remaining.TotalMilliseconds + 1500 
-                    : 1000;
-            }
-            return 6000;
-        }
-
-        private async Task EndCall()
-        {
-            var success = await _callManagementService.HangUpCallAsync(m_callerId);
-            if (!success)
-            {
-                _logger.LogWarning($"⚠️ Failed to hang up call for: {m_callerId}");
-            }
-            await Close();
         }
 
         public async Task SendAudioToExternalAI(byte[] data)
         {
-            await _audioStreamProcessor.SendAudioToExternalAIAsync(data, _voiceSessionManager.SendMessageAsync);
+            try
+            {
+                // Check if session is ready
+                lock (_sessionLock)
+                {
+                    if (!_sessionReady)
+                    {
+                        // Buffer audio data until session is ready
+                        if (_pendingAudioBuffer.Count < MAX_PENDING_AUDIO_PACKETS)
+                        {
+                            _pendingAudioBuffer.Enqueue(data);
+                            _logger.LogDebug($"🎤 Buffered audio packet (queue size: {_pendingAudioBuffer.Count})");
+                        }
+                        else
+                        {
+                            // Remove oldest packet to make room for new one
+                            _pendingAudioBuffer.Dequeue();
+                            _pendingAudioBuffer.Enqueue(data);
+                            _logger.LogDebug($"🎤 Buffered audio packet (queue full, replaced oldest)");
+                        }
+                        return;
+                    }
+                }
+
+                // Session is ready, process audio immediately
+                await _audioStreamProcessor.SendAudioToExternalAIAsync(data, _voiceSessionManager.SendMessageAsync);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "❌ Error sending audio to external AI");
+            }
         }
 
         public async Task Close()
         {
             try
             {
-                m_cts.Cancel();
-                m_cts.Dispose();
-                await _voiceSessionManager.CloseAsync();
-                _logger.LogInformation("🔚 AzureVoiceLiveService closed successfully");
+                _logger.LogInformation("🛑 Closing AzureVoiceLiveService...");
+                
+                // Mark session as not ready
+                lock (_sessionLock)
+                {
+                    _sessionReady = false;
+                    _pendingAudioBuffer.Clear(); // Clear any pending audio
+                }
+                
+                _cancellationTokenSource.Cancel();
+                
+                // Use CallFlowManager for proper cleanup
+                await _callFlowManager.EndCallAsync();
+                
+                _cancellationTokenSource.Dispose();
+                
+                _logger.LogInformation("✅ AzureVoiceLiveService closed successfully");
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "❌ Error closing AzureVoiceLiveService");
+            }
+        }
+
+        /// <summary>
+        /// Get service status for debugging
+        /// </summary>
+        public (bool IsConnected, bool IsCallActive, bool IsEndingCall, bool SessionReady, int BufferedPackets) GetServiceStatus()
+        {
+            lock (_sessionLock)
+            {
+                return (
+                    _voiceSessionManager.IsConnected,
+                    _callFlowManager.IsCallActive(),
+                    _messageProcessor.IsEndingCall,
+                    _sessionReady,
+                    _pendingAudioBuffer.Count
+                );
             }
         }
     }

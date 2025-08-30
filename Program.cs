@@ -9,6 +9,8 @@ using System.ComponentModel.DataAnnotations;
 using CallAutomation.AzureAI.VoiceLive;
 using CallAutomation.AzureAI.VoiceLive.Services.Interfaces;
 using CallAutomation.AzureAI.VoiceLive.Services;
+using CallAutomation.AzureAI.VoiceLive.Services.Staff.Matching.StringSimilarity;
+using CallAutomation.AzureAI.VoiceLive.Services.Voice;
 
 // Configure Serilog with file rotation and size limits
 Log.Logger = new LoggerConfiguration()
@@ -31,13 +33,26 @@ ArgumentNullException.ThrowIfNullOrEmpty(acsConnectionString);
 //Call Automation Client
 var client = new CallAutomationClient(acsConnectionString);
 
-// Register new services for dependency injection
+// Register existing services for dependency injection
 builder.Services.AddScoped<IStaffLookupService, StaffLookupService>();
 builder.Services.AddScoped<IEmailService, EmailService>();
 builder.Services.AddScoped<ICallManagementService, CallManagementService>();
 builder.Services.AddScoped<IFunctionCallProcessor, FunctionCallProcessor>();
 builder.Services.AddScoped<IAudioStreamProcessor, AudioStreamProcessor>();
 builder.Services.AddScoped<IVoiceSessionManager, VoiceSessionManager>();
+
+// Register string similarity services
+builder.Services.AddScoped<CompositeSimilarityMatcher>();
+
+// Register voice configuration services
+builder.Services.AddScoped<SessionConfigBuilder>();
+
+// Register staff lookup support services
+builder.Services.AddScoped<CallAutomation.AzureAI.VoiceLive.Services.Staff.StaffCacheService>();
+builder.Services.AddScoped<CallAutomation.AzureAI.VoiceLive.Services.Staff.TableQueryService>();
+builder.Services.AddScoped<CallAutomation.AzureAI.VoiceLive.Services.Staff.FuzzyMatchingService>();
+
+// DO NOT register MessageProcessor and CallFlowManager - they are manually created with specific callerId
 
 var app = builder.Build();
 var appBaseUrl = builder.Configuration["AppBaseUrl"]?.TrimEnd('/');
@@ -123,12 +138,12 @@ app.MapPost("/api/callbacks/{contextId}", async (
         if (@event is CallConnected callConnectedEvent)
         {
             activeCallConnections[contextId] = callConnectedEvent.CallConnectionId;
-            logger.LogInformation($"📞 Call connected - storing CallConnectionId: {callConnectedEvent.CallConnectionId} for context: {contextId}");
+            logger.LogInformation($"Call connected - storing CallConnectionId: {callConnectedEvent.CallConnectionId} for context: {contextId}");
         }
         else if (@event is CallDisconnected callDisconnectedEvent)
         {
             activeCallConnections.Remove(contextId);
-            logger.LogInformation($"📞 Call disconnected - removed CallConnectionId for context: {contextId}");
+            logger.LogInformation($"Call disconnected - removed CallConnectionId for context: {contextId}");
         }
     }
 

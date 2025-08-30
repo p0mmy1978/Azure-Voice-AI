@@ -19,5 +19,14 @@ namespace CallAutomation.AzureAI.VoiceLive.Services.Interfaces
         /// <param name="department">Optional department filter</param>
         /// <returns>Email address if found and valid</returns>
         Task<string?> GetStaffEmailAsync(string name, string? department = null);
+
+        /// <summary>
+        /// Confirm a fuzzy match after user verification
+        /// </summary>
+        /// <param name="originalName">Original name the user said</param>
+        /// <param name="confirmedName">Name the user confirmed</param>
+        /// <param name="department">Department</param>
+        /// <returns>Lookup result after confirmation</returns>
+        Task<StaffLookupResult> ConfirmFuzzyMatchAsync(string originalName, string confirmedName, string department);
     }
 }

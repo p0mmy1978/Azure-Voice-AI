@@ -1,43 +1,71 @@
-using Azure.Data.Tables;
 using CallAutomation.AzureAI.VoiceLive.Models;
 using CallAutomation.AzureAI.VoiceLive.Services.Interfaces;
+using CallAutomation.AzureAI.VoiceLive.Services.Staff;
+using Microsoft.Extensions.Logging;
 
 namespace CallAutomation.AzureAI.VoiceLive.Services
 {
     public class StaffLookupService : IStaffLookupService
     {
-        private readonly TableClient _tableClient;
+        private readonly TableQueryService _tableQuery;
+        private readonly StaffCacheService _cache;
+        private readonly FuzzyMatchingService _fuzzyMatcher;
         private readonly ILogger<StaffLookupService> _logger;
 
-        public StaffLookupService(IConfiguration configuration, ILogger<StaffLookupService> logger)
+        public StaffLookupService(
+            TableQueryService tableQuery,
+            StaffCacheService cache,
+            FuzzyMatchingService fuzzyMatcher,
+            ILogger<StaffLookupService> logger)
         {
+            _tableQuery = tableQuery;
+            _cache = cache;
+            _fuzzyMatcher = fuzzyMatcher;
             _logger = logger;
-            
-            var tableServiceUri = new Uri(configuration["StorageUri"]!);
-            _tableClient = new TableClient(
-                tableServiceUri,
-                configuration["TableName"]!,
-                new TableSharedKeyCredential(
-                    configuration["StorageAccountName"]!,
-                    configuration["StorageAccountKey"]!));
         }
 
         public async Task<StaffLookupResult> CheckStaffExistsAsync(string name, string? department = null)
         {
             try
             {
-                var normalized = NormalizeName(name);
-                _logger.LogInformation($"🔍 [StaffLookup] Checking staff: {name} (normalized: {normalized}), department: {department}");
+                var normalized = NameNormalizer.Normalize(name);
+                _logger.LogInformation($"🔍 [StaffLookup] Checking: {name} (normalized: {normalized}), department: {department}");
 
-                // If department is provided, try exact match first
-                if (!string.IsNullOrWhiteSpace(department))
+                // Check cache first
+                if (_cache.TryGetCached(name, department, out var cachedResult))
                 {
-                    return await CheckWithDepartment(normalized, name, department);
+                    return cachedResult;
                 }
-                else
+
+                // Try exact match
+                var exactResult = await TryExactMatchAsync(normalized, name, department);
+                if (exactResult.Status == StaffLookupStatus.Authorized)
                 {
-                    return await CheckWithoutDepartment(normalized, name);
+                    _cache.CacheResult(name, department, exactResult);
+                    return exactResult;
                 }
+                
+                if (exactResult.Status == StaffLookupStatus.MultipleFound)
+                {
+                    return exactResult;
+                }
+
+                // Try fuzzy matching
+                _logger.LogInformation($"🔍 [StaffLookup] No exact match, trying fuzzy matching for: {name}");
+                var fuzzyResult = await _fuzzyMatcher.TryFuzzyMatchAsync(name, department);
+                
+                if (fuzzyResult.Status != StaffLookupStatus.NotFound)
+                {
+                    return fuzzyResult;
+                }
+
+                // Log speech hints and return not found
+                NameNormalizer.LogSpeechHints(name, _logger);
+                return new StaffLookupResult 
+                { 
+                    Status = StaffLookupStatus.NotFound,
+                    Message = $"No staff member found matching '{name}'. Please try spelling the name or provide the department."
+                };
             }
             catch (Exception ex)
             {
@@ -52,37 +80,154 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
 
         public async Task<string?> GetStaffEmailAsync(string name, string? department = null)
         {
-            var result = await CheckStaffExistsAsync(name, department);
-            return result.Status == StaffLookupStatus.Authorized ? result.Email : null;
+            try
+            {
+                var normalized = NameNormalizer.Normalize(name);
+                _logger.LogInformation($"📧 [EmailLookup] Getting email for: {name}, department: {department}");
+
+                // Check cache first
+                if (_cache.TryGetCached(name, department, out var cachedResult))
+                {
+                    _logger.LogInformation($"✅ [Cache] Using cached email for {name}: {cachedResult.Email}");
+                    return cachedResult.Email;
+                }
+
+                // Try exact match with department
+                if (!string.IsNullOrWhiteSpace(department))
+                {
+                    var entity = await _tableQuery.GetStaffByExactMatchAsync(normalized, department);
+                    if (entity != null)
+                    {
+                        var email = TableQueryService.GetEmailFromEntity(entity);
+                        if (TableQueryService.IsValidEmail(email))
+                        {
+                            var result = new StaffLookupResult
+                            {
+                                Status = StaffLookupStatus.Authorized,
+                                Email = email,
+                                RowKey = entity.RowKey,
+                                SuggestedDepartment = department
+                            };
+                            _cache.CacheResult(name, department, result);
+                            return email;
+                        }
+                    }
+                }
+
+                // Find all matches
+                var matches = await _tableQuery.FindAllMatchesAsync(normalized);
+                
+                if (matches.Count == 1)
+                {
+                    var email = TableQueryService.GetEmailFromEntity(matches[0]);
+                    if (TableQueryService.IsValidEmail(email))
+                    {
+                        // EXTRACT DEPARTMENT EVEN FOR SINGLE MATCHES
+                        var extractedDepartment = ExtractDepartmentFromEntity(matches[0]);
+                        
+                        var result = new StaffLookupResult
+                        {
+                            Status = StaffLookupStatus.Authorized,
+                            Email = email,
+                            RowKey = matches[0].RowKey,
+                            SuggestedDepartment = extractedDepartment
+                        };
+                        _cache.CacheResult(name, extractedDepartment, result);
+                        
+                        _logger.LogInformation($"✅ [EmailLookup] Single match found: {name} -> {email} in {extractedDepartment ?? "no department"}");
+                        return email;
+                    }
+                }
+                else if (matches.Count > 1)
+                {
+                    return HandleMultipleMatches(matches, department, name);
+                }
+
+                _logger.LogWarning($"❌ [EmailLookup] No valid email found for: {name}");
+                return null;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, $"🔴 Error getting staff email for: {name}");
+                return null;
+            }
         }
 
-        private async Task<StaffLookupResult> CheckWithDepartment(string normalized, string originalName, string department)
+        public async Task<StaffLookupResult> ConfirmFuzzyMatchAsync(string originalName, string confirmedName, string department)
         {
-            var normalizedDept = department.Trim().ToLowerInvariant();
-            var exactRowKey = $"{normalized}_{normalizedDept}";
-            
-            _logger.LogInformation($"🔍 [StaffLookup] Looking up with department: {exactRowKey}");
-            
-            var exactResult = await _tableClient.GetEntityIfExistsAsync<TableEntity>("staff", exactRowKey);
-            
-            if (exactResult.HasValue && exactResult.Value != null)
+            try
             {
-                var entity = exactResult.Value;
-                var email = GetEmailFromEntity(entity);
+                _logger.LogInformation($"✅ [Confirmation] User confirmed: '{originalName}' -> '{confirmedName}' in {department}");
                 
-                if (IsValidEmail(email))
+                var normalizedConfirmed = NameNormalizer.Normalize(confirmedName);
+                var entity = await _tableQuery.GetStaffByExactMatchAsync(normalizedConfirmed, department);
+                
+                if (entity != null)
                 {
-                    _logger.LogInformation($"✅ Staff authorized: {originalName} in {department}, email: {email}");
+                    var email = TableQueryService.GetEmailFromEntity(entity);
+                    if (TableQueryService.IsValidEmail(email))
+                    {
+                        _logger.LogInformation($"✅ [Confirmation] Confirmed match authorized: {confirmedName}");
+                        return new StaffLookupResult
+                        {
+                            Status = StaffLookupStatus.Authorized,
+                            Email = email,
+                            RowKey = entity.RowKey,
+                            Message = $"Confirmed and authorized: {confirmedName}",
+                            SuggestedDepartment = department
+                        };
+                    }
+                }
+                
+                return new StaffLookupResult
+                {
+                    Status = StaffLookupStatus.NotFound,
+                    Message = "Confirmed staff member not found"
+                };
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, $"🔴 Error confirming fuzzy match for: {originalName} -> {confirmedName}");
+                return new StaffLookupResult 
+                { 
+                    Status = StaffLookupStatus.NotFound,
+                    Message = "Error occurred during confirmation"
+                };
+            }
+        }
+
+        private async Task<StaffLookupResult> TryExactMatchAsync(string normalized, string originalName, string? department)
+        {
+            if (!string.IsNullOrWhiteSpace(department))
+            {
+                return await CheckWithDepartmentAsync(normalized, originalName, department);
+            }
+            else
+            {
+                return await CheckWithoutDepartmentAsync(normalized, originalName);
+            }
+        }
+
+        private async Task<StaffLookupResult> CheckWithDepartmentAsync(string normalized, string originalName, string department)
+        {
+            var entity = await _tableQuery.GetStaffByExactMatchAsync(normalized, department);
+            
+            if (entity != null)
+            {
+                var email = TableQueryService.GetEmailFromEntity(entity);
+                if (TableQueryService.IsValidEmail(email))
+                {
+                    _logger.LogInformation($"✅ Staff authorized: {originalName} in {department}");
                     return new StaffLookupResult
                     {
                         Status = StaffLookupStatus.Authorized,
                         Email = email,
-                        RowKey = exactRowKey
+                        RowKey = entity.RowKey,
+                        SuggestedDepartment = department
                     };
                 }
                 else
                 {
-                    _logger.LogWarning($"❌ Staff found but invalid email: {originalName} in {department}");
                     return new StaffLookupResult
                     {
                         Status = StaffLookupStatus.NotAuthorized,
@@ -92,7 +237,6 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
             }
             else
             {
-                _logger.LogWarning($"❌ Staff NOT found: {originalName} in {department}");
                 return new StaffLookupResult
                 {
                     Status = StaffLookupStatus.NotAuthorized,
@@ -101,30 +245,12 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
             }
         }
 
-        private async Task<StaffLookupResult> CheckWithoutDepartment(string normalized, string originalName)
+        private async Task<StaffLookupResult> CheckWithoutDepartmentAsync(string normalized, string originalName)
         {
-            _logger.LogInformation($"🔍 [StaffLookup] Searching for all matches of: {normalized}");
-            
-            // Query all entities that start with the normalized name
-            var query = _tableClient.QueryAsync<TableEntity>(
-                filter: $"PartitionKey eq 'staff' and RowKey ge '{normalized}' and RowKey lt '{normalized}~'",
-                maxPerPage: 10);
-            
-            var matches = new List<TableEntity>();
-            await foreach (var entity in query)
-            {
-                // Check if RowKey starts with our normalized name
-                if (entity.RowKey.StartsWith(normalized))
-                {
-                    matches.Add(entity);
-                }
-            }
-            
-            _logger.LogInformation($"🔍 Found {matches.Count} potential matches");
+            var matches = await _tableQuery.FindAllMatchesAsync(normalized);
             
             if (matches.Count == 0)
             {
-                _logger.LogWarning($"❌ No staff found matching: {originalName}");
                 return new StaffLookupResult
                 {
                     Status = StaffLookupStatus.NotFound,
@@ -133,22 +259,25 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
             }
             else if (matches.Count == 1)
             {
-                var match = matches[0];
-                var email = GetEmailFromEntity(match);
-                
-                if (IsValidEmail(email))
+                var email = TableQueryService.GetEmailFromEntity(matches[0]);
+                if (TableQueryService.IsValidEmail(email))
                 {
-                    _logger.LogInformation($"✅ Single match found and authorized: {originalName}");
+                    // EXTRACT DEPARTMENT FROM THE SINGLE MATCH
+                    var department = ExtractDepartmentFromEntity(matches[0]);
+                    
+                    _logger.LogInformation($"✅ Single match authorized: {originalName} in {department ?? "no department"}");
                     return new StaffLookupResult
                     {
                         Status = StaffLookupStatus.Authorized,
                         Email = email,
-                        RowKey = match.RowKey
+                        RowKey = matches[0].RowKey,
+                        SuggestedDepartment = department, // ADD THIS
+                        Message = $"Found staff member '{originalName}'" + 
+                                 (!string.IsNullOrWhiteSpace(department) ? $" in {department}" : "")
                     };
                 }
                 else
                 {
-                    _logger.LogWarning($"❌ Single match found but invalid email: {originalName}");
                     return new StaffLookupResult
                     {
                         Status = StaffLookupStatus.NotAuthorized,
@@ -158,38 +287,79 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
             }
             else
             {
-                // Multiple matches found - need clarification
-                var departments = matches.Where(m => m.ContainsKey("Department"))
-                    .Select(m => m["Department"]?.ToString())
-                    .Where(d => !string.IsNullOrWhiteSpace(d))
-                    .Distinct()
-                    .ToList();
-                
-                _logger.LogInformation($"🟡 Multiple matches found for {originalName}. Departments: {string.Join(", ", departments)}");
+                // Multiple matches found
+                var departments = TableQueryService.ExtractDepartments(matches);
+                _logger.LogInformation($"🟡 Multiple matches for {originalName}. Departments: {string.Join(", ", departments)}");
                 
                 return new StaffLookupResult
                 {
                     Status = StaffLookupStatus.MultipleFound,
                     AvailableDepartments = departments,
-                    Message = $"Multiple staff members found with name '{originalName}'. Please specify department."
+                    Message = $"Multiple staff members named '{originalName}' found. Please specify department: {string.Join(", ", departments)}"
                 };
             }
         }
 
-        private static string NormalizeName(string name)
+        private string? HandleMultipleMatches(List<Azure.Data.Tables.TableEntity> matches, string? department, string name)
         {
-            return (name ?? string.Empty).Trim().ToLowerInvariant().Replace(" ", "");
+            // If department specified, try to find exact match
+            if (!string.IsNullOrWhiteSpace(department))
+            {
+                var deptMatch = matches.FirstOrDefault(m => 
+                    m.ContainsKey("Department") && 
+                    string.Equals(m["Department"]?.ToString(), department, StringComparison.OrdinalIgnoreCase));
+                
+                if (deptMatch != null)
+                {
+                    var email = TableQueryService.GetEmailFromEntity(deptMatch);
+                    if (TableQueryService.IsValidEmail(email))
+                    {
+                        _logger.LogInformation($"✅ [EmailLookup] Department match: {name} in {department} -> {email}");
+                        return email;
+                    }
+                }
+            }
+
+            // Fallback to first valid email
+            var departments = TableQueryService.ExtractDepartments(matches);
+            _logger.LogWarning($"⚠️ [EmailLookup] Multiple matches for {name}. Departments: {string.Join(", ", departments)}");
+            
+            var firstValidEmail = matches
+                .Select(TableQueryService.GetEmailFromEntity)
+                .FirstOrDefault(TableQueryService.IsValidEmail);
+                
+            if (firstValidEmail != null)
+            {
+                _logger.LogWarning($"⚠️ [EmailLookup] Using first valid email: {firstValidEmail}");
+                return firstValidEmail;
+            }
+
+            return null;
         }
 
-        private static string? GetEmailFromEntity(TableEntity entity)
+        /// <summary>
+        /// Extract department from table entity
+        /// </summary>
+        private string? ExtractDepartmentFromEntity(Azure.Data.Tables.TableEntity entity)
         {
-            var emailObj = entity.ContainsKey("email") ? entity["email"] : null;
-            return emailObj?.ToString()?.Trim();
-        }
+            if (entity.ContainsKey("Department"))
+            {
+                return entity["Department"]?.ToString()?.Trim();
+            }
 
-        private static bool IsValidEmail(string? email)
-        {
-            return !string.IsNullOrWhiteSpace(email) && email.Contains("@");
+            // Try to extract from RowKey if Department field is missing
+            // RowKey format: "name_department"
+            var rowKey = entity.RowKey;
+            var lastUnderscoreIndex = rowKey.LastIndexOf('_');
+            if (lastUnderscoreIndex > 0 && lastUnderscoreIndex < rowKey.Length - 1)
+            {
+                var departmentFromRowKey = rowKey.Substring(lastUnderscoreIndex + 1);
+                _logger.LogDebug($"🔍 [StaffLookup] Extracted department from RowKey: {departmentFromRowKey}");
+                return departmentFromRowKey;
+            }
+
+            _logger.LogDebug($"🔍 [StaffLookup] No department found for entity with RowKey: {rowKey}");
+            return null;
         }
     }
 }

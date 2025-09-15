@@ -18,9 +18,11 @@ namespace CallAutomation.AzureAI.VoiceLive
         private readonly IAudioStreamProcessor _audioStreamProcessor;
         private readonly MessageProcessor _messageProcessor;
         private readonly CallFlowManager _callFlowManager;
+        private readonly ICallSessionManager _callSessionManager; // NEW
         
         // Processing control
         private readonly CancellationTokenSource _cancellationTokenSource;
+        private readonly Timer _timeoutMonitor; // NEW: Monitor for session timeouts
         
         // Session state management
         private volatile bool _sessionReady = false;
@@ -56,6 +58,9 @@ namespace CallAutomation.AzureAI.VoiceLive
             // Initialize call management
             callManagementService.Initialize(callAutomationClient, activeCallConnections);
             
+            // Get session manager from service provider to monitor timeouts
+            _callSessionManager = mediaStreaming.GetServiceProvider().GetRequiredService<ICallSessionManager>();
+            
             // Create specialized processors with correctly typed loggers
             _messageProcessor = new MessageProcessor(
                 functionCallProcessor, 
@@ -70,8 +75,50 @@ namespace CallAutomation.AzureAI.VoiceLive
                 loggerFactory.CreateLogger<CallFlowManager>(),
                 callerId);
             
+            // NEW: Start timeout monitoring every 5 seconds
+            _timeoutMonitor = new Timer(CheckSessionTimeout, null, TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(5));
+            
             // Start the AI session initialization
             _ = Task.Run(async () => await InitializeAISessionAsync());
+        }
+
+        /// <summary>
+        /// NEW: Monitor session timeout and force end call if exceeded
+        /// </summary>
+        private async void CheckSessionTimeout(object? state)
+        {
+            try
+            {
+                if (_callSessionManager.IsCallExpired(_callerId))
+                {
+                    var remainingTime = _callSessionManager.GetRemainingTime(_callerId);
+                    _logger.LogWarning($"⏰ Session timeout exceeded for: {_callerId} | Remaining time: {remainingTime.TotalSeconds:F1}s");
+                    
+                    // Force end the call to prevent bill shock
+                    _logger.LogWarning($"🚨 BILL SHOCK PREVENTION: Force ending call for {_callerId} due to 90s timeout");
+                    
+                    // Use the message processor to force end call state
+                    _messageProcessor.ForceEndCall();
+                    
+                    // End the call immediately
+                    await _callFlowManager.EndCallAsync();
+                    
+                    // Stop monitoring this call
+                    _timeoutMonitor?.Dispose();
+                }
+                else
+                {
+                    var remainingTime = _callSessionManager.GetRemainingTime(_callerId);
+                    if (remainingTime.TotalSeconds <= 10 && remainingTime.TotalSeconds > 0)
+                    {
+                        _logger.LogWarning($"⏰ Session expiring soon for: {_callerId} | Remaining: {remainingTime.TotalSeconds:F1}s");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, $"❌ Error checking session timeout for: {_callerId}");
+            }
         }
 
         private async Task InitializeAISessionAsync()
@@ -130,6 +177,10 @@ namespace CallAutomation.AzureAI.VoiceLive
                 }
                 
                 _logger.LogInformation("✅ AI session initialization completed successfully");
+                
+                // NEW: Log session timeout information
+                var remainingTime = _callSessionManager.GetRemainingTime(_callerId);
+                _logger.LogInformation($"⏰ Session timeout monitoring active - Remaining time: {remainingTime.TotalSeconds:F1}s");
             }
             catch (Exception ex)
             {
@@ -264,6 +315,15 @@ namespace CallAutomation.AzureAI.VoiceLive
                 
                 while (_voiceSessionManager.IsConnected && !cancellationToken.IsCancellationRequested)
                 {
+                    // NEW: Check for session timeout before processing messages
+                    if (_callSessionManager.IsCallExpired(_callerId))
+                    {
+                        _logger.LogWarning($"⏰ Session expired during message processing for: {_callerId}");
+                        _messageProcessor.ForceEndCall();
+                        await _callFlowManager.EndCallAsync();
+                        break;
+                    }
+
                     var receivedMessage = await _voiceSessionManager.ReceiveMessageAsync(cancellationToken);
                     
                     if (string.IsNullOrWhiteSpace(receivedMessage))
@@ -306,6 +366,13 @@ namespace CallAutomation.AzureAI.VoiceLive
         {
             try
             {
+                // NEW: Check session timeout before processing audio
+                if (_callSessionManager.IsCallExpired(_callerId))
+                {
+                    _logger.LogWarning($"⏰ Rejecting audio - session expired for: {_callerId}");
+                    return;
+                }
+
                 // Check if session is ready
                 lock (_sessionLock)
                 {
@@ -343,6 +410,9 @@ namespace CallAutomation.AzureAI.VoiceLive
             {
                 _logger.LogInformation("🛑 Closing AzureVoiceLiveService...");
                 
+                // NEW: Dispose timeout monitor
+                _timeoutMonitor?.Dispose();
+                
                 // Mark session as not ready
                 lock (_sessionLock)
                 {
@@ -366,9 +436,9 @@ namespace CallAutomation.AzureAI.VoiceLive
         }
 
         /// <summary>
-        /// Get service status for debugging
+        /// Get service status for debugging (enhanced with timeout info)
         /// </summary>
-        public (bool IsConnected, bool IsCallActive, bool IsEndingCall, bool SessionReady, int BufferedPackets) GetServiceStatus()
+        public (bool IsConnected, bool IsCallActive, bool IsEndingCall, bool SessionReady, int BufferedPackets, TimeSpan RemainingTime, bool IsExpired) GetServiceStatus()
         {
             lock (_sessionLock)
             {
@@ -377,7 +447,9 @@ namespace CallAutomation.AzureAI.VoiceLive
                     _callFlowManager.IsCallActive(),
                     _messageProcessor.IsEndingCall,
                     _sessionReady,
-                    _pendingAudioBuffer.Count
+                    _pendingAudioBuffer.Count,
+                    _callSessionManager.GetRemainingTime(_callerId),
+                    _callSessionManager.IsCallExpired(_callerId)
                 );
             }
         }

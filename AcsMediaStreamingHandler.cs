@@ -39,12 +39,30 @@ public class AcsMediaStreamingHandler
         m_logger.LogInformation($"🔗 AcsMediaStreamingHandler initialized with Caller ID: {m_callerId}");
     }
 
+    // NEW: Expose service provider for dependency access
+    public IServiceProvider GetServiceProvider() => _serviceProvider;
+
     public async Task ProcessWebSocketAsync()
     {
         if (m_webSocket == null)
         {
             return;
         }
+
+        // Get call session manager to check limits and timeouts
+        var sessionManager = _serviceProvider.GetRequiredService<ICallSessionManager>();
+        
+        // Verify call can still proceed (in case of race conditions)
+        if (!sessionManager.CanAcceptNewCall())
+        {
+            m_logger.LogWarning($"🚫 Call rejected during WebSocket setup - limit exceeded: {m_callerId}");
+            await CloseNormalWebSocketAsync();
+            return;
+        }
+
+        // Log session timeout information
+        var remainingTime = sessionManager.GetRemainingTime(m_callerId);
+        m_logger.LogInformation($"⏰ Session timeout: {remainingTime.TotalSeconds:F1}s remaining for: {m_callerId}");
 
         // OPTIMIZED: Get all services upfront to avoid delays during processing
         var staffLookupService = _serviceProvider.GetRequiredService<IStaffLookupService>();
@@ -113,7 +131,23 @@ public class AcsMediaStreamingHandler
         finally
         {
             m_logger.LogInformation("🛑 Cleaning up AcsMediaStreamingHandler...");
-            await m_aiServiceHandler.Close();
+            
+            // NEW: End the call session tracking
+            try
+            {
+                var callSessionManager = _serviceProvider.GetRequiredService<ICallSessionManager>();
+                callSessionManager.EndCallSession(m_callerId);
+                m_logger.LogInformation($"✅ Call session ended for: {m_callerId}");
+            }
+            catch (Exception ex)
+            {
+                m_logger.LogError(ex, $"❌ Error ending call session for: {m_callerId}");
+            }
+            
+            if (m_aiServiceHandler != null)
+            {
+                await m_aiServiceHandler.Close();
+            }
             this.Close();
             m_logger.LogInformation("✅ AcsMediaStreamingHandler cleanup completed");
         }
@@ -125,6 +159,14 @@ public class AcsMediaStreamingHandler
         {
             try
             {
+                // NEW: Check if session has expired before sending
+                var callSessionManager = _serviceProvider.GetRequiredService<ICallSessionManager>();
+                if (callSessionManager.IsCallExpired(m_callerId))
+                {
+                    m_logger.LogWarning($"⏰ Refusing to send message - session expired for: {m_callerId}");
+                    return;
+                }
+
                 byte[] jsonBytes = Encoding.UTF8.GetBytes(message);
 
                 // Send the PCM audio chunk over WebSocket
@@ -157,7 +199,8 @@ public class AcsMediaStreamingHandler
         {
             if (m_webSocket?.State == WebSocketState.Open)
             {
-                await m_webSocket.CloseAsync(result.CloseStatus.Value, result.CloseStatusDescription, CancellationToken.None);
+                await m_webSocket.CloseAsync(result.CloseStatus ?? WebSocketCloseStatus.NormalClosure, 
+                    result.CloseStatusDescription, CancellationToken.None);
                 m_logger.LogInformation("🛑 WebSocket closed with received close status");
             }
         }
@@ -205,13 +248,24 @@ public class AcsMediaStreamingHandler
     {
         try
         {
+            // NEW: Check session timeout before processing audio
+            var callSessionManager = _serviceProvider.GetRequiredService<ICallSessionManager>();
+            if (callSessionManager.IsCallExpired(m_callerId))
+            {
+                m_logger.LogWarning($"⏰ Dropping audio data - session expired for: {m_callerId}");
+                return;
+            }
+
             var input = StreamingData.Parse(data);
             if (input is AudioData audioData)
             {
                 if (!audioData.IsSilent)
                 {
                     // OPTIMIZED: Process audio data without blocking
-                    await m_aiServiceHandler.SendAudioToExternalAI(audioData.Data.ToArray());
+                    if (m_aiServiceHandler != null)
+                    {
+                        await m_aiServiceHandler.SendAudioToExternalAI(audioData.Data.ToArray());
+                    }
                     
                     // Only log every 100th audio packet to reduce log spam
                     if (audioData.Data.Length > 0 && audioData.Data.Length % 100 == 0)
@@ -244,10 +298,19 @@ public class AcsMediaStreamingHandler
             const int bufferSize = 4096; // Increased from 2048
             byte[] receiveBuffer = new byte[bufferSize];
             
+            var callSessionManager = _serviceProvider.GetRequiredService<ICallSessionManager>();
+            
             while (m_webSocket.State == WebSocketState.Open && !m_cts.Token.IsCancellationRequested)
             {
                 try
                 {
+                    // NEW: Check session timeout before processing
+                    if (callSessionManager.IsCallExpired(m_callerId))
+                    {
+                        m_logger.LogWarning($"⏰ Session expired - stopping WebSocket processing for: {m_callerId}");
+                        break;
+                    }
+
                     WebSocketReceiveResult receiveResult = await m_webSocket.ReceiveAsync(
                         new ArraySegment<byte>(receiveBuffer), 
                         m_cts.Token);

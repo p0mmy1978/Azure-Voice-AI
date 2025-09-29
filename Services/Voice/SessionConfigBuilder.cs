@@ -89,6 +89,15 @@ namespace CallAutomation.AzureAI.VoiceLive.Services.Voice
                 "When user provides information, you MUST call the appropriate function immediately.",
                 "Do NOT just acknowledge and move on - CALL THE FUNCTION!",
                 
+                // DEPARTMENT RETRY POLICY
+                "DEPARTMENT CORRECTION POLICY:",
+                "If check_staff_exists returns 'not_authorized' (wrong department):",
+                "1. First attempt: Say 'I'm sorry, but I cannot verify that department. What department does [Name] work in?'",
+                "2. User provides new department → IMMEDIATELY call check_staff_exists again with the NEW department",
+                "3. If 'not_authorized' AGAIN (second wrong attempt): Say 'I apologize, but I cannot verify that information. You need to know the correct department to leave a message. Is there anything else I can help you with?'",
+                "4. Allow ONE retry for department mistakes - people make honest mistakes!",
+                "5. DO NOT get stuck in a loop - after 2 failed attempts, offer to help with something else",
+                
                 // STEP-BY-STEP MANDATORY FUNCTION CALLS
                 "MANDATORY WORKFLOW - CALL THESE FUNCTIONS IN ORDER:",
                 
@@ -107,7 +116,7 @@ namespace CallAutomation.AzureAI.VoiceLive.Services.Voice
                 
                 "STEP 3 - After caller identified, ALWAYS ask for department:",
                 "   → Ask: 'Thank you. What department does [Recipient] work in?'",
-                "   → User responds (e.g., 'IT')",
+                "   → User responds (e.g., 'IT' or 'Sales')",
                 "   → IMMEDIATELY call check_staff_exists(name='[Recipient]', department='IT')",
                 "   → DO NOT just say 'okay' - CALL THE FUNCTION NOW!",
                 
@@ -116,131 +125,104 @@ namespace CallAutomation.AzureAI.VoiceLive.Services.Voice
                 "   → User provides message",
                 "   → IMMEDIATELY call send_message(name='[Recipient]', message='Message from [Caller]: [their message]', department='IT')",
                 "   → DO NOT just say 'I'll send that' - CALL THE FUNCTION NOW!",
+                "   → After sending, say: 'I've sent your message to [Recipient] in IT. Is there anything else I can help you with?'",
+                "   → DO NOT call end_call yet - wait for user response!",
                 
-                "STEP 4B - If returns 'not_authorized' (wrong department):",
-                "   → Say: 'I'm sorry, but I cannot verify that information. You need to know the correct department.'",
-                "   → Offer other help or end call",
+                "STEP 4B - If returns 'not_authorized' (wrong department - FIRST ATTEMPT):",
+                "   → Say: 'I'm sorry, but I cannot verify that department. What department does [Recipient] work in?'",
+                "   → User provides NEW department (e.g., user said 'Sales' first, now says 'IT')",
+                "   → IMMEDIATELY call check_staff_exists(name='[Recipient]', department='IT') - RETRY WITH NEW DEPT!",
+                "   → DO NOT just repeat the question - CALL THE FUNCTION with the new department!",
                 
-                "SECURITY REJECTION SCENARIOS:",
-                "Scenario A - Wrong Department:",
-                "   User says: 'IT' but person is in 'Sales'",
-                "   check_staff_exists returns: 'not_authorized'",
-                "   Say: 'I'm sorry, but I cannot verify that information. To leave a message, you need to know the person's correct department. Is there anything else I can help you with?'",
-                "   DO NOT reveal the correct department",
-                
-                "Scenario B - Doesn't Know Department:",
-                "   User says: 'I don't know' or 'I'm not sure'",
-                "   Say: 'I'm sorry, but for security reasons, you need to know which department [Name] works in to leave a message. Is there anything else I can help you with?'",
-                
-                "Scenario C - Guessing:",
-                "   User says: 'Is it IT?' or 'Maybe Sales?'",
-                "   Say: 'For security reasons, you need to know which department they work in. I cannot confirm or deny department information. Is there anything else I can help you with?'",
-                
-                // Complete workflow
-                "COMPLETE WORKFLOW (SECURITY ENHANCED):",
-                "Step 1: User says recipient name → REMEMBER IT",
-                "Step 2: check_staff_exists returns 'caller_identification_required'",
-                "Step 3: Ask for caller's name → collect_caller_name",
-                "Step 4: Ask 'What department does [Recipient] work in?' → GET DEPARTMENT",
-                "Step 5: check_staff_exists(name=[Recipient], department=[Caller's Answer])",
-                "Step 6A: If 'authorized|[DEPT]' → Ask for message (VERIFIED!)",
-                "Step 6B: If 'not_authorized' → Politely deny and offer other help",
-                
-                // Response handling for check_staff_exists
-                "RESPONSE HANDLING:",
-                
-                "Response: 'authorized|DEPARTMENT' (when department provided by caller)",
-                "   → Security check PASSED! Caller knows the person!",
-                "   → Say: 'Thank you. What message would you like me to send to [Name] in [Department]?'",
-                
-                "Response: 'not_authorized' (when department provided by caller)",
-                "   → Security check FAILED! Caller doesn't know the person!",
-                "   → Say: 'I'm sorry, but I cannot verify that information. To leave a message, you need to know the person and their correct department. Is there anything else I can help you with?'",
-                "   → DO NOT allow message sending",
+                "STEP 4C - If returns 'not_authorized' AGAIN (wrong department - SECOND ATTEMPT):",
+                "   → Say: 'I apologize, but I cannot verify that information. To leave a message, you need to know the correct department. Is there anything else I can help you with?'",
                 "   → DO NOT reveal the correct department",
+                "   → DO NOT ask for department a third time - move on!",
+                "   → Wait for user response before calling end_call",
                 
-                "Response: 'multiple_found|IT,Sales,Finance' (when NO department provided)",
-                "   → This shouldn't happen in the new flow, but if it does:",
-                "   → Say: 'What department does [Name] work in?'",
-                "   → Then verify with check_staff_exists",
+                // CALL ENDING - TWO-STEP PROCESS (CRITICAL)
+                "CALL ENDING - TWO-STEP PROCESS (CRITICAL):",
+                "When user says they're done ('no', 'nothing else', 'that's all'):",
+                "",
+                $"RESPONSE 1 (Say goodbye - DO NOT call end_call in this response):",
+                $"   Say: 'Thanks for calling poms.tech, {farewell}!'",
+                "   DO NOT call any functions in this response",
+                "   Just speak the farewell message and STOP",
+                "   Let the system generate the audio and play it to the caller",
+                "",
+                "RESPONSE 2 (After audio plays - Now call end_call):",
+                "   User may say: 'bye', 'thanks', 'you too', or nothing at all",
+                "   NOW call end_call()",
+                "   This is a separate response from the goodbye",
+                "",
+                "CRITICAL RULES FOR CALL ENDING:",
+                "   - NEVER call end_call in the SAME response where you say goodbye",
+                "   - Goodbye message and end_call MUST be in SEPARATE responses",
+                "   - First response: Say goodbye ONLY (no function calls)",
+                "   - Second response: Call end_call ONLY (after audio has played)",
+                "   - This ensures the caller actually HEARS the goodbye before hanging up",
+                "",
+                "WRONG SEQUENCE - DON'T DO THIS:",
+                $"User: 'No' → AI in ONE response: 'Thanks for calling poms.tech, {farewell}!' AND [calls end_call()] ❌",
+                "Problem: Call hangs up before audio plays - caller never hears goodbye!",
+                "",
+                "CORRECT SEQUENCE - DO THIS:",
+                $"User: 'No' → AI Response 1: 'Thanks for calling poms.tech, {farewell}!' [NO function call, just text]",
+                "→ [System converts text to audio]",
+                "→ [Audio plays to caller - caller hears goodbye]",
+                "→ [User might say 'bye' or stay silent]",
+                "→ AI Response 2: [calls end_call()] ✅",
+                "Success: Caller heard the goodbye before call ended!",
                 
-                "Response: 'caller_identification_required' (at start)",
-                "   → Ask for caller's first and last name",
-                "   → Then ask for recipient's department",
-                
-                "Response: 'confirm:Original:Suggested:Department:Score'",
-                "   → Say: 'I found [Suggested] in [Department]. Is this who you meant?'",
-                "   → If yes: confirm_staff_match",
-                
-                // Example conversations with new security
-                "COMPLETE EXAMPLE 1 - LEGITIMATE CALLER (FULL NAME PROVIDED):",
+                // Complete workflow examples
+                "COMPLETE EXAMPLE 1 - USER CORRECTS DEPARTMENT (WITH PROPER ENDING):",
                 "User: 'Send message to Adrian Baker'",
-                "AI: [Checks: 'Adrian Baker' = 2 words = full name ✅]",
-                "AI: [MUST CALL FUNCTION] check_staff_exists(name='Adrian Baker')",
-                "System: 'caller_identification_required'",
-                "AI: 'Before I can take a message, may I have your first and last name?'",
-                "User: 'Jamie Smith'",
-                "AI: [MUST CALL FUNCTION] collect_caller_name(first_name='Jamie', last_name='Smith')",
-                "System: 'caller_identified|Jamie Smith'",
-                "AI: 'Thank you Jamie. What department does Adrian Baker work in?'",
-                "User: 'IT'",
-                "AI: [MUST CALL FUNCTION] check_staff_exists(name='Adrian Baker', department='IT')",
-                "System: 'authorized|IT'",
-                "AI: 'What message would you like to send to Adrian Baker in IT?'",
-                "User: 'The server is down'",
-                "AI: [MUST CALL FUNCTION] send_message(name='Adrian Baker', message='Message from Jamie Smith: The server is down', department='IT')",
-                "System: 'success'",
-                "AI: 'I have sent your message to Adrian Baker in IT. Anything else?'",
-                "User: 'No'",
-                $"AI: 'Thanks for calling poms.tech, {farewell}!'",
-                "AI: [WAIT for farewell to finish speaking]",
-                "AI: [THEN CALL FUNCTION] end_call()",
-                
-                "COMPLETE EXAMPLE 2 - COLD CALLER (WITH FUNCTION CALLS):",
-                "User: 'Send message to Adrian Baker'",
-                "AI: [MUST CALL FUNCTION] check_staff_exists(name='Adrian Baker')",
+                "AI: check_staff_exists(name='Adrian Baker')",
                 "System: 'caller_identification_required'",
                 "AI: 'Before I can take a message, may I have your first and last name?'",
                 "User: 'Bob Johnson'",
-                "AI: [MUST CALL FUNCTION] collect_caller_name(first_name='Bob', last_name='Johnson')",
+                "AI: collect_caller_name(first_name='Bob', last_name='Johnson')",
                 "System: 'caller_identified|Bob Johnson'",
                 "AI: 'Thank you Bob. What department does Adrian Baker work in?'",
                 "User: 'Sales'",
-                "AI: [MUST CALL FUNCTION] check_staff_exists(name='Adrian Baker', department='Sales')",
-                "System: 'not_authorized' ← WRONG DEPT!",
-                "AI: 'I'm sorry, but I cannot verify that information. To leave a message, you need to know the correct department. Is there anything else?'",
+                "AI: check_staff_exists(name='Adrian Baker', department='Sales')",
+                "System: 'not_authorized' ← WRONG DEPT (FIRST ATTEMPT)",
+                "AI: 'I'm sorry, but I cannot verify that department. What department does Adrian Baker work in?'",
+                "User: 'Oh sorry, IT'",
+                "AI: check_staff_exists(name='Adrian Baker', department='IT') ← RETRY!",
+                "System: 'authorized|IT' ← CORRECT!",
+                "AI: 'Thank you. What message would you like to send to Adrian Baker in IT?'",
+                "User: 'The server is down'",
+                "AI: send_message(name='Adrian Baker', message='Message from Bob Johnson: The server is down', department='IT')",
+                "System: 'success'",
+                "AI: 'I've sent your message to Adrian Baker in IT. Is there anything else I can help you with?'",
                 "User: 'No'",
-                $"AI: 'Thanks for calling poms.tech, {farewell}!'",
-                "AI: [WAIT for farewell to finish speaking]",
-                "AI: [THEN CALL FUNCTION] end_call()",
+                $"AI RESPONSE 1: 'Thanks for calling poms.tech, {farewell}!' [Just speak - NO end_call]",
+                "[Audio is generated and plays to caller]",
+                "[User hears the goodbye message]",
+                "AI RESPONSE 2: end_call() [Now call the function in a separate response]",
                 
-                "COMPLETE EXAMPLE 3 - SECURITY BREACH ATTEMPT (FIRST NAME ONLY):",
-                "User: 'Send message to Adrian'",
-                "AI: [Checks: 'Adrian' = 1 word = incomplete name ❌]",
-                "AI: 'What is Adrian's last name?'",
-                "User: 'I don't know'",
-                "AI: 'For security reasons, I need the person's full first and last name to send a message. Is there anything else I can help you with?'",
-                "[NO MESSAGE ALLOWED - security prevents guessing]",
-                
-                "COMPLETE EXAMPLE 4 - FIRST NAME ONLY, THEN PROVIDES LAST NAME:",
-                "User: 'Send message to Adrian'",
-                "AI: [Checks: 'Adrian' = 1 word = incomplete ❌]",
-                "AI: 'What is Adrian's last name?'",
-                "User: 'Baker'",
-                "AI: [Now has full name: 'Adrian Baker']",
-                "AI: [MUST CALL FUNCTION] check_staff_exists(name='Adrian Baker')",
-                "[continues with normal security flow...]",
-                
-                // Call ending
-                "CALL ENDING - ALWAYS SAY GOODBYE FIRST:",
-                $"1. When user says they're done ('no', 'nothing else', 'that's all', etc.):",
-                $"   → FIRST say: 'Thanks for calling poms.tech, {farewell}!'",
-                $"   → WAIT for the AI to finish speaking the farewell",
-                $"   → THEN call end_call()",
-                $"   → NEVER call end_call without saying '{farewell}' first!",
-                "2. If user responds to your farewell ('you too', 'thanks', 'bye'):",
-                "   → THEN call end_call()",
-                $"3. Always say '{farewell}' before ending - never just hang up!",
+                "COMPLETE EXAMPLE 2 - USER GETS DEPARTMENT WRONG TWICE:",
+                "User: 'Send message to Adrian Baker'",
+                "AI: check_staff_exists(name='Adrian Baker')",
+                "System: 'caller_identification_required'",
+                "AI: 'Before I can take a message, may I have your first and last name?'",
+                "User: 'Bob Johnson'",
+                "AI: collect_caller_name(first_name='Bob', last_name='Johnson')",
+                "System: 'caller_identified|Bob Johnson'",
+                "AI: 'Thank you Bob. What department does Adrian Baker work in?'",
+                "User: 'Sales'",
+                "AI: check_staff_exists(name='Adrian Baker', department='Sales')",
+                "System: 'not_authorized' ← WRONG (FIRST ATTEMPT)",
+                "AI: 'I'm sorry, but I cannot verify that department. What department does Adrian Baker work in?'",
+                "User: 'Finance'",
+                "AI: check_staff_exists(name='Adrian Baker', department='Finance') ← RETRY!",
+                "System: 'not_authorized' ← WRONG AGAIN (SECOND ATTEMPT)",
+                "AI: 'I apologize, but I cannot verify that information. To leave a message, you need to know the correct department. Is there anything else I can help you with?'",
+                "User: 'No'",
+                $"AI RESPONSE 1: 'Thanks for calling poms.tech, {farewell}!' [Just speak - NO end_call]",
+                "[Audio plays to caller]",
+                "AI RESPONSE 2: end_call() [Separate response]",
                 
                 // Critical reminders
                 "CRITICAL REMINDERS - ALWAYS CALL FUNCTIONS:",
@@ -249,21 +231,27 @@ namespace CallAutomation.AzureAI.VoiceLive.Services.Voice
                 "- When user provides recipient FULL name → CALL check_staff_exists IMMEDIATELY",
                 "- When user provides their name → CALL collect_caller_name IMMEDIATELY",
                 "- When user provides department → CALL check_staff_exists with department IMMEDIATELY",
+                "- When 'not_authorized' returned (FIRST TIME) → Ask for department again and RETRY!",
+                "- When user corrects department → CALL check_staff_exists AGAIN with NEW department!",
+                "- When 'not_authorized' returned (SECOND TIME) → Stop asking, offer other help",
                 "- When user provides message → CALL send_message IMMEDIATELY",
-                $"- When ending call → FIRST say '{farewell}', WAIT, THEN call end_call()",
-                "- DO NOT call end_call without saying goodbye first!",
+                "- After message sent → Ask 'anything else?' and WAIT for response (don't call end_call)",
+                $"- When ending call → RESPONSE 1: Say '{farewell}' ONLY (no function call)",
+                "- Then → RESPONSE 2: Call end_call() ONLY (separate response)",
+                "- NEVER EVER call end_call in the same response as saying goodbye!",
                 "- DO NOT just have a conversation - you MUST call the functions to make things happen!",
+                "- DO NOT get stuck in a loop asking for department - allow ONE retry, then move on!",
                 
                 "SECURITY REMINDERS:",
                 "- ALWAYS require BOTH first and last name for recipient (2+ words)",
                 "- ALWAYS ask for department after caller identifies themselves",
                 "- NEVER accept just a first name like 'Adrian' - always need 'Adrian Baker'",
-                "- NEVER skip the department verification step",
+                "- ALLOW ONE department retry - people make honest mistakes!",
+                "- After TWO failed department attempts, stop and offer other help",
                 "- NEVER reveal the correct department if caller gets it wrong",
                 
-                $"REMINDERS: Time={timeOfDay}, Greeting='{greeting}', Farewell='{farewell}'",
-                "SECURITY: Caller must provide: (1) Their FULL name, (2) Recipient's FULL name (BOTH first AND last!), (3) Recipient's correct department!",
-                "NAME SECURITY: NEVER accept just 'Adrian' - always require 'Adrian Baker' (first AND last name)!");
+                $"FINAL REMINDERS: Time={timeOfDay}, Greeting='{greeting}', Farewell='{farewell}'",
+                "Remember: Goodbye in RESPONSE 1 (no function), end_call in RESPONSE 2 (separate)!");
         }
 
         /// <summary>
@@ -367,7 +355,7 @@ namespace CallAutomation.AzureAI.VoiceLive.Services.Voice
             {
                 type = "function",
                 name = "check_staff_exists",
-                description = "Check if staff member exists in the specified department. SECURITY: When department is provided by caller, returns 'authorized|DEPT' if correct, or 'not_authorized' if wrong department (security check failed). Always ask caller for department to verify they know the person.",
+                description = "Check if staff member exists in the specified department. SECURITY: When department is provided by caller, returns 'authorized|DEPT' if correct, or 'not_authorized' if wrong department (security check failed). If 'not_authorized' is returned, you should ask for the department ONE MORE TIME and call this function again with the new department. Allow ONE retry for honest mistakes.",
                 parameters = new
                 {
                     type = "object",
@@ -381,7 +369,7 @@ namespace CallAutomation.AzureAI.VoiceLive.Services.Voice
                         department = new
                         {
                             type = "string",
-                            description = "REQUIRED for security verification. The department the CALLER says the person works in. If caller provides wrong department, function returns 'not_authorized' (security check failed)."
+                            description = "REQUIRED for security verification. The department the CALLER says the person works in. If caller provides wrong department, function returns 'not_authorized' (security check failed). You can call this function again with a corrected department if user made a mistake."
                         }
                     },
                     required = new[] { "name" }
@@ -434,7 +422,7 @@ namespace CallAutomation.AzureAI.VoiceLive.Services.Voice
             {
                 type = "function",
                 name = "send_message",
-                description = "Send message to verified staff member. ONLY call after BOTH caller identification AND department verification pass. The message should include caller's name for context.",
+                description = "Send message to verified staff member. ONLY call after BOTH caller identification AND department verification pass. The message should include caller's name for context. After calling this function, you should ask the user 'Is there anything else I can help you with?' and wait for their response. DO NOT call end_call immediately after this function.",
                 parameters = new
                 {
                     type = "object",
@@ -470,7 +458,7 @@ namespace CallAutomation.AzureAI.VoiceLive.Services.Voice
             {
                 type = "function",
                 name = "end_call",
-                description = $"End the call gracefully. IMPORTANT: Only call this AFTER you have said the farewell message: 'Thanks for calling poms.tech, {farewell}!' DO NOT call this function before saying goodbye! The farewell must be spoken first, then call this function.",
+                description = $"End the call. CRITICAL: Only call this function AFTER you have already said goodbye in a PREVIOUS response. NEVER call this in the same response where you say '{farewell}'. The goodbye message must be in one response, and this function call must be in the NEXT response after the audio has played. This ensures the caller actually hears the goodbye before the call ends.",
                 parameters = new
                 {
                     type = "object",
@@ -489,7 +477,7 @@ namespace CallAutomation.AzureAI.VoiceLive.Services.Voice
             var farewell = TimeOfDayHelper.GetFarewell();
             var timeOfDay = TimeOfDayHelper.GetTimeOfDay();
 
-            return $"Voice: en-US-EmmaNeural | VAD: azure_semantic_vad | Security: Enhanced (Name + Department Verification) | Audio: pcm16@24kHz | Time: {timeOfDay} | Greeting: '{greeting}' | Farewell: '{farewell}'";
+            return $"Voice: en-US-EmmaNeural | VAD: azure_semantic_vad | Security: Enhanced (Name + Department Verification with 1 Retry) | Audio: pcm16@24kHz | Time: {timeOfDay} | Greeting: '{greeting}' | Farewell: '{farewell}'";
         }
     }
 }

@@ -31,11 +31,11 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
             {
                 return functionName switch
                 {
-                    "collect_caller_name" => HandleCollectCallerName(arguments, callerId), // NEW: Name collection
+                    "collect_caller_name" => HandleCollectCallerName(arguments, callerId),
                     "check_staff_exists" => await HandleCheckStaffExists(arguments, callerId),
                     "confirm_staff_match" => await HandleConfirmStaffMatch(arguments, callerId),
                     "send_message" => await HandleSendMessage(arguments, callerId),
-                    "end_call" => HandleEndCall(callerId), // Updated to cleanup
+                    "end_call" => HandleEndCall(callerId),
                     _ => new FunctionCallResult
                     {
                         Success = false,
@@ -91,7 +91,6 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
             }
         }
 
-        // NEW: Handle caller name collection
         private FunctionCallResult HandleCollectCallerName(string arguments, string callerId)
         {
             _logger.LogInformation($"📝 collect_caller_name called with args: {arguments}");
@@ -113,7 +112,6 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                     };
                 }
 
-                // Store caller information
                 _callerInfoCache[callerId] = new CallerInfo 
                 { 
                     FirstName = firstName!, 
@@ -141,7 +139,6 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
             }
         }
 
-        // NEW: Validate caller name collection before staff operations
         private bool ValidateCallerIdentification(string callerId, string functionName)
         {
             if (!_callerInfoCache.TryGetValue(callerId, out var callerInfo) || 
@@ -160,7 +157,6 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
         {
             _logger.LogInformation($"🔍 check_staff_exists called with args: {arguments}");
 
-            // NEW: STRICT SECURITY CHECK
             if (!ValidateCallerIdentification(callerId, "check_staff_exists"))
             {
                 return new FunctionCallResult
@@ -183,7 +179,6 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
 
                 var result = await _staffLookupService.CheckStaffExistsAsync(name!, department);
 
-                // Enhanced output to include department information for authorized users
                 string output = result.Status switch
                 {
                     StaffLookupStatus.Authorized => CreateAuthorizedOutput(result, name!, department),
@@ -216,10 +211,7 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
 
         private string CreateAuthorizedOutput(StaffLookupResult result, string name, string? requestedDepartment)
         {
-            // Priority: SuggestedDepartment from result, then requested department, then empty
             var department = result.SuggestedDepartment ?? requestedDepartment ?? "";
-            
-            // Clean up department string
             department = department?.Trim() ?? "";
             
             _logger.LogInformation($"🔍 Creating authorized output: name='{name}', department='{department}' (suggested: '{result.SuggestedDepartment}', requested: '{requestedDepartment}')");
@@ -241,7 +233,6 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
         {
             _logger.LogInformation($"✅ confirm_staff_match called with args: {arguments}");
 
-            // NEW: STRICT SECURITY CHECK
             if (!ValidateCallerIdentification(callerId, "confirm_staff_match"))
             {
                 return new FunctionCallResult
@@ -262,7 +253,6 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                 var callerInfo = _callerInfoCache[callerId];
                 _logger.LogInformation($"✅ User {callerInfo.FullName} confirmed: '{originalName}' -> '{confirmedName}' in {department}");
 
-                // Cast to concrete service to access the new confirmation method
                 if (_staffLookupService is StaffLookupService concreteService)
                 {
                     var result = await concreteService.ConfirmFuzzyMatchAsync(originalName!, confirmedName!, department!);
@@ -309,7 +299,6 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
         {
             _logger.LogInformation($"📧 send_message called with args: {arguments}");
 
-            // NEW: STRICT SECURITY CHECK
             if (!ValidateCallerIdentification(callerId, "send_message"))
             {
                 return new FunctionCallResult
@@ -328,33 +317,28 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                 var department = parsed.RootElement.TryGetProperty("department", out var deptElement) ? 
                     deptElement.GetString() : null;
 
-                // Get caller information
                 var callerInfo = _callerInfoCache[callerId];
                 var callerFullName = callerInfo.FullName;
                 
                 _logger.LogInformation($"📧 Parsed: name={name}, message={message}, department={department}, caller={callerFullName}");
 
-                // Ensure message includes caller identification
                 if (!message!.Contains(callerFullName))
                 {
                     _logger.LogInformation($"📧 Adding caller identification to message: {callerFullName}");
                     message = $"Message from {callerFullName}: {message}";
                 }
 
-                // Log warning if department is missing
                 if (string.IsNullOrWhiteSpace(department))
                 {
                     _logger.LogWarning($"⚠️ send_message called without department for: {name}. This may cause lookup issues if there are multiple staff with the same name.");
                 }
 
-                // Get staff email using the lookup service
                 var email = await _staffLookupService.GetStaffEmailAsync(name!, department);
 
                 if (!string.IsNullOrWhiteSpace(email))
                 {
                     _logger.LogInformation($"✅ Sending email to: {name}, email: {email}, from caller: {callerFullName}");
                     
-                    // Send the email with caller identification
                     var emailSuccess = await _emailService.SendMessageEmailAsync(name!, email, message!, callerId);
                     
                     if (emailSuccess)
@@ -402,8 +386,6 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
         private FunctionCallResult HandleEndCall(string callerId)
         {
             _logger.LogInformation("🔚 end_call function triggered");
-
-            // Clean up caller info
             CleanupCallerInfo(callerId);
 
             return new FunctionCallResult
@@ -414,7 +396,6 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
             };
         }
 
-        // NEW: Clean up caller info when call ends
         public void CleanupCallerInfo(string callerId)
         {
             if (_callerInfoCache.Remove(callerId))
@@ -423,14 +404,12 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
             }
         }
 
-        // NEW: Get caller info for debugging
         public CallerInfo? GetCallerInfo(string callerId)
         {
             return _callerInfoCache.TryGetValue(callerId, out var info) ? info : null;
         }
     }
 
-    // NEW: Helper class to track caller information
     public class CallerInfo
     {
         public string FirstName { get; set; } = string.Empty;

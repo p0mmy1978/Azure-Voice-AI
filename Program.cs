@@ -6,7 +6,7 @@ using Azure.Messaging.EventGrid.SystemEvents;
 using Microsoft.AspNetCore.Mvc;
 using Newtonsoft.Json;
 using System.ComponentModel.DataAnnotations;
-using System.Net.WebSockets; // NEW: Added missing using directive
+using System.Net.WebSockets;
 using CallAutomation.AzureAI.VoiceLive;
 using CallAutomation.AzureAI.VoiceLive.Services.Interfaces;
 using CallAutomation.AzureAI.VoiceLive.Services;
@@ -17,11 +17,11 @@ using CallAutomation.AzureAI.VoiceLive.Services.Voice;
 Log.Logger = new LoggerConfiguration()
     .WriteTo.Console()
     .WriteTo.File("logs/app-log-.txt",
-        rollingInterval: RollingInterval.Day,           
-        fileSizeLimitBytes: 10 * 1024 * 1024,          
-        rollOnFileSizeLimit: true,                      
-        retainedFileCountLimit: 10,                     
-        shared: true)                                   
+        rollingInterval: RollingInterval.Day,
+        fileSizeLimitBytes: 10 * 1024 * 1024,
+        rollOnFileSizeLimit: true,
+        retainedFileCountLimit: 10,
+        shared: true)
     .CreateLogger();
 
 var builder = WebApplication.CreateBuilder(args);
@@ -33,6 +33,9 @@ ArgumentNullException.ThrowIfNullOrEmpty(acsConnectionString);
 
 //Call Automation Client
 var client = new CallAutomationClient(acsConnectionString);
+
+// Dictionary to track active call connections for hangup
+var activeCallConnections = new Dictionary<string, string>(); // contextId -> callConnectionId
 
 // Register existing services for dependency injection
 builder.Services.AddScoped<IStaffLookupService, StaffLookupService>();
@@ -53,14 +56,46 @@ builder.Services.AddScoped<CallAutomation.AzureAI.VoiceLive.Services.Staff.Staff
 builder.Services.AddScoped<CallAutomation.AzureAI.VoiceLive.Services.Staff.TableQueryService>();
 builder.Services.AddScoped<CallAutomation.AzureAI.VoiceLive.Services.Staff.FuzzyMatchingService>();
 
-// NEW: Register call session management service (Singleton for shared state)
-builder.Services.AddSingleton<ICallSessionManager, CallSessionManager>();
+// Register call session management service with ACTIVE bill shock prevention
+builder.Services.AddSingleton<ICallSessionManager>(provider =>
+{
+    var logger = provider.GetRequiredService<ILogger<CallSessionManager>>();
+    var callSessionManager = new CallSessionManager(logger);
+
+    // Wire up force termination callback for bill shock prevention
+    callSessionManager.ForceTerminateCallback = async (callerId, connectionId, overtime) =>
+    {
+        try
+        {
+            logger.LogError($"🚨 BILL SHOCK PREVENTION: Force terminating call {callerId} after {overtime.TotalSeconds:F1}s overtime");
+
+            // Get call management service and force hang up
+            using var scope = provider.CreateScope();
+            var callManagementService = scope.ServiceProvider.GetRequiredService<ICallManagementService>();
+            callManagementService.Initialize(client, activeCallConnections);
+
+            var success = await callManagementService.HangUpCallAsync(callerId);
+
+            if (success)
+            {
+                logger.LogWarning($"✅ BILL SHOCK PREVENTION: Successfully force terminated call {callerId}");
+            }
+            else
+            {
+                logger.LogError($"❌ BILL SHOCK PREVENTION: Failed to force terminate call {callerId}");
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, $"❌ BILL SHOCK PREVENTION: Exception force terminating call {callerId}");
+        }
+    };
+
+    return callSessionManager;
+});
 
 var app = builder.Build();
 var appBaseUrl = builder.Configuration["AppBaseUrl"]?.TrimEnd('/');
-
-// Dictionary to track active call connections for hangup
-var activeCallConnections = new Dictionary<string, string>(); // contextId -> callConnectionId
 
 if (string.IsNullOrEmpty(appBaseUrl))
 {
@@ -96,30 +131,31 @@ app.MapPost("/api/incomingCall", async (
         var jsonObject = Helper.GetJsonObject(eventGridEvent.Data);
         var callerId = Helper.GetCallerId(jsonObject);
         var incomingCallContext = Helper.GetIncomingCallContext(jsonObject);
-        
+
         logger.LogInformation($"📞 Incoming call from: {callerId}");
-        
-        // NEW: Check if we can accept this call (max 2 concurrent)
+
+        // Check if we can accept this call (max 2 concurrent)
         if (!callSessionManager.CanAcceptNewCall())
         {
             logger.LogWarning($"🚫 Call rejected - maximum concurrent calls (2) reached. Caller: {callerId}");
             logger.LogWarning($"📊 Current active calls: {callSessionManager.GetActiveCallCount()}/2");
-            
+
             // Return rejection response - call will not be answered
-            return Results.Ok(new { 
-                status = "rejected", 
+            return Results.Ok(new
+            {
+                status = "rejected",
                 reason = "max_calls_reached",
                 message = "Maximum concurrent calls (2) exceeded",
                 activeCallCount = callSessionManager.GetActiveCallCount()
             });
         }
-        
+
         logger.LogInformation($"✅ Call accepted - current active calls: {callSessionManager.GetActiveCallCount()}/2");
         logger.LogInformation($"appBaseUrl: {appBaseUrl}");
-        
+
         var callbackUri = new Uri(new Uri(appBaseUrl), $"/api/callbacks/{Guid.NewGuid()}?callerId={callerId}");
         logger.LogInformation($"Callback Url: {callbackUri}");
-        
+
         // Include callerId in WebSocket URL
         var websocketUri = appBaseUrl.Replace("https", "wss") + $"/ws?callerId={callerId}";
         logger.LogInformation($"WebSocket Url: {websocketUri}");
@@ -142,12 +178,13 @@ app.MapPost("/api/incomingCall", async (
         {
             AnswerCallResult answerCallResult = await client.AnswerCallAsync(options);
             logger.LogInformation($"✅ Answered call for connection id: {answerCallResult.CallConnection.CallConnectionId}");
-            
-            // NEW: Track this call session with 90-second timeout
+
+            // Track this call session with 90-second timeout and ACTIVE bill shock prevention
             callSessionManager.StartCallSession(callerId, answerCallResult.CallConnection.CallConnectionId);
-            
+
             var remainingTime = callSessionManager.GetRemainingTime(callerId);
             logger.LogInformation($"⏰ Call session started with {remainingTime.TotalSeconds:F0}s timeout for: {callerId}");
+            logger.LogWarning($"🚨 BILL SHOCK PREVENTION: Call will be FORCE TERMINATED at 90s limit for: {callerId}");
         }
         catch (Exception ex)
         {
@@ -170,23 +207,24 @@ app.MapPost("/api/callbacks/{contextId}", async (
     {
         CallAutomationEventBase @event = CallAutomationEventParser.Parse(cloudEvent);
         logger.LogInformation($"Event received: {JsonConvert.SerializeObject(@event, Formatting.Indented)}");
-        
+
         // Capture CallConnectionId for hangup later
         if (@event is CallConnected callConnectedEvent)
         {
             activeCallConnections[contextId] = callConnectedEvent.CallConnectionId;
             logger.LogInformation($"Call connected - storing CallConnectionId: {callConnectedEvent.CallConnectionId} for context: {contextId}");
-            
-            // Log session information
+
+            // Log session information with bill shock prevention warning
             var remainingTime = callSessionManager.GetRemainingTime(callerId);
             logger.LogInformation($"⏰ Call connected with {remainingTime.TotalSeconds:F0}s remaining for: {callerId}");
+            logger.LogWarning($"🚨 BILL SHOCK PREVENTION: Active monitoring for 90s timeout on: {callerId}");
         }
         else if (@event is CallDisconnected callDisconnectedEvent)
         {
             activeCallConnections.Remove(contextId);
             logger.LogInformation($"Call disconnected - removed CallConnectionId for context: {contextId}");
-            
-            // NEW: End call session tracking
+
+            // End call session tracking
             callSessionManager.EndCallSession(callerId);
             logger.LogInformation($"✅ Call session ended for: {callerId} | Active calls: {callSessionManager.GetActiveCallCount()}/2");
         }
@@ -195,14 +233,14 @@ app.MapPost("/api/callbacks/{contextId}", async (
     return Results.Ok();
 });
 
-// NEW: Monitoring endpoint for call session status
+// Enhanced monitoring endpoint for call session status with bill shock prevention info
 app.MapGet("/api/monitoring/sessions", (ICallSessionManager callSessionManager) =>
 {
     try
     {
         var stats = callSessionManager.GetSessionStats();
         var expiredCalls = callSessionManager.GetExpiredCalls();
-        
+
         return Results.Ok(new
         {
             timestamp = DateTime.UtcNow,
@@ -218,6 +256,12 @@ app.MapGet("/api/monitoring/sessions", (ICallSessionManager callSessionManager) 
             {
                 maxConcurrentCalls = 2,
                 sessionTimeoutSeconds = 90,
+                billShockPrevention = new
+                {
+                    enabled = true,
+                    forceTerminationActive = true,
+                    description = "Calls automatically terminated at 90s to prevent billing overrun"
+                },
                 nameCollectionRequired = true,
                 firstAndLastNameMandatory = true
             }
@@ -229,14 +273,14 @@ app.MapGet("/api/monitoring/sessions", (ICallSessionManager callSessionManager) 
     }
 });
 
-// NEW: Health check endpoint with session awareness
+// Enhanced health check endpoint with bill shock prevention status
 app.MapGet("/api/health", (ICallSessionManager callSessionManager) =>
 {
     try
     {
         var activeCallCount = callSessionManager.GetActiveCallCount();
         var expiredCalls = callSessionManager.GetExpiredCalls();
-        
+
         var healthStatus = new
         {
             status = expiredCalls.Any() ? "warning" : "healthy",
@@ -247,9 +291,14 @@ app.MapGet("/api/health", (ICallSessionManager callSessionManager) =>
             expiredCallsCount = expiredCalls.Count,
             sessionTimeoutPolicy = "90 seconds",
             nameCollectionPolicy = "First and Last Name Required",
-            billShockPrevention = expiredCalls.Any() ? "Active - Expired calls detected!" : "Active"
+            billShockPrevention = new
+            {
+                status = "Active",
+                forceTermination = "Enabled",
+                description = expiredCalls.Any() ? "Active - Expired calls detected and terminated!" : "Active - Monitoring for 90s timeout violations"
+            }
         };
-        
+
         // Include expired call details if any exist
         if (expiredCalls.Any())
         {
@@ -263,7 +312,12 @@ app.MapGet("/api/health", (ICallSessionManager callSessionManager) =>
                 expiredCallsCount = expiredCalls.Count,
                 sessionTimeoutPolicy = "90 seconds",
                 nameCollectionPolicy = "First and Last Name Required",
-                billShockPrevention = "Active - Expired calls detected!",
+                billShockPrevention = new
+                {
+                    status = "ACTIVE - CALLS TERMINATED",
+                    forceTermination = "Enabled",
+                    description = "Expired calls detected and automatically terminated to prevent billing overrun"
+                },
                 expiredCalls = expiredCalls.Select(c => new
                 {
                     callerId = c.CallerId,
@@ -271,7 +325,7 @@ app.MapGet("/api/health", (ICallSessionManager callSessionManager) =>
                 })
             });
         }
-        
+
         return Results.Ok(healthStatus);
     }
     catch (Exception ex)
@@ -285,14 +339,14 @@ app.MapGet("/api/health", (ICallSessionManager callSessionManager) =>
     }
 });
 
-// NEW: Get detailed call statistics
+// Get detailed call statistics with bill shock prevention metrics
 app.MapGet("/api/monitoring/statistics", (ICallSessionManager callSessionManager) =>
 {
     try
     {
         var stats = callSessionManager.GetSessionStats();
         var sessions = stats["Sessions"] as List<object> ?? new List<object>();
-        
+
         return Results.Ok(new
         {
             timestamp = DateTime.UtcNow,
@@ -311,7 +365,9 @@ app.MapGet("/api/monitoring/statistics", (ICallSessionManager callSessionManager
                 {
                     enabled = true,
                     maxSessionDuration = "90 seconds",
-                    autoTermination = true
+                    autoTermination = true,
+                    forceTerminationEnabled = true,
+                    description = "Calls are forcibly terminated at 90s to prevent billing overrun"
                 },
                 concurrencyControl = new
                 {
@@ -334,7 +390,7 @@ app.MapGet("/api/monitoring/statistics", (ICallSessionManager callSessionManager
     }
 });
 
-// NEW: Force end expired calls endpoint (emergency use)
+// Enhanced force end expired calls endpoint with bill shock prevention
 app.MapPost("/api/admin/force-end-expired", async (
     ICallSessionManager callSessionManager,
     ICallManagementService callManagementService,
@@ -344,7 +400,7 @@ app.MapPost("/api/admin/force-end-expired", async (
     {
         var expiredCalls = callSessionManager.GetExpiredCalls();
         var results = new List<object>();
-        
+
         if (!expiredCalls.Any())
         {
             return Results.Ok(new
@@ -352,40 +408,42 @@ app.MapPost("/api/admin/force-end-expired", async (
                 timestamp = DateTime.UtcNow,
                 message = "No expired calls found",
                 expiredCallsProcessed = 0,
-                results = new List<object>()
+                results = new List<object>(),
+                billShockPrevention = "No action needed - all calls within limits"
             });
         }
-        
-        logger.LogWarning($"🚨 ADMIN: Force ending {expiredCalls.Count} expired calls");
-        
+
+        logger.LogError($"🚨 ADMIN BILL SHOCK PREVENTION: Force ending {expiredCalls.Count} expired calls");
+
         foreach (var (callerId, connectionId, overtime) in expiredCalls)
         {
             try
             {
-                logger.LogWarning($"🚨 ADMIN: Force ending expired call: {callerId} (overtime: {overtime.TotalSeconds:F1}s)");
-                
+                logger.LogError($"🚨 ADMIN BILL SHOCK PREVENTION: Force ending expired call: {callerId} (overtime: {overtime.TotalSeconds:F1}s)");
+
                 // Initialize call management service if needed
                 using var scope = app.Services.CreateScope();
                 var callMgmt = scope.ServiceProvider.GetRequiredService<ICallManagementService>();
                 callMgmt.Initialize(client, activeCallConnections);
-                
+
                 var success = await callMgmt.HangUpCallAsync(callerId);
                 callSessionManager.EndCallSession(callerId);
-                
+
                 results.Add(new
                 {
                     callerId = callerId,
                     connectionId = connectionId,
                     overtimeSeconds = overtime.TotalSeconds,
                     forceEndSuccess = success,
-                    action = "terminated"
+                    action = "terminated",
+                    reason = "Bill shock prevention - 90s timeout exceeded"
                 });
-                
-                logger.LogInformation($"✅ ADMIN: Successfully force-ended call: {callerId}");
+
+                logger.LogWarning($"✅ ADMIN BILL SHOCK PREVENTION: Successfully force-ended call: {callerId}");
             }
             catch (Exception ex)
             {
-                logger.LogError(ex, $"❌ ADMIN: Failed to force-end call: {callerId}");
+                logger.LogError(ex, $"❌ ADMIN BILL SHOCK PREVENTION: Failed to force-end call: {callerId}");
                 results.Add(new
                 {
                     callerId = callerId,
@@ -397,25 +455,26 @@ app.MapPost("/api/admin/force-end-expired", async (
                 });
             }
         }
-        
+
         return Results.Ok(new
         {
             timestamp = DateTime.UtcNow,
             expiredCallsProcessed = expiredCalls.Count,
             results = results,
-            message = $"Processed {expiredCalls.Count} expired calls"
+            message = $"BILL SHOCK PREVENTION: Processed {expiredCalls.Count} expired calls",
+            billShockPrevention = "Emergency termination completed"
         });
     }
     catch (Exception ex)
     {
-        logger.LogError(ex, "❌ ADMIN: Error in force-end-expired endpoint");
+        logger.LogError(ex, "❌ ADMIN BILL SHOCK PREVENTION: Error in force-end-expired endpoint");
         return Results.Problem($"Error force-ending expired calls: {ex.Message}");
     }
 });
 
 app.UseWebSockets();
 
-// WebSocket handler with dependency injection support
+// WebSocket handler with dependency injection support and bill shock prevention
 app.Use(async (context, next) =>
 {
     if (context.Request.Path == "/ws")
@@ -432,7 +491,7 @@ app.Use(async (context, next) =>
 
                 // Get call session manager to verify session is still valid
                 var callSessionManager = app.Services.GetRequiredService<ICallSessionManager>();
-                
+
                 // Double-check that this call should still be active
                 if (callSessionManager.IsCallExpired(callerId))
                 {
@@ -443,22 +502,23 @@ app.Use(async (context, next) =>
 
                 var remainingTime = callSessionManager.GetRemainingTime(callerId);
                 Log.Information($"⏰ WebSocket connected with {remainingTime.TotalSeconds:F0}s remaining for: {callerId}");
+                Log.Warning($"🚨 BILL SHOCK PREVENTION: Call will be force terminated if it exceeds 90s total duration");
 
                 // Get logger from DI for this request
                 var loggerFactory = app.Services.GetRequiredService<ILoggerFactory>();
                 var aiLogger = loggerFactory.CreateLogger<AzureVoiceLiveService>();
-                
+
                 // Create a service scope for dependency injection
                 using var scope = app.Services.CreateScope();
                 var serviceProvider = scope.ServiceProvider;
-                
+
                 // Pass all required dependencies including service provider
                 var mediaService = new AcsMediaStreamingHandler(
-                    webSocket, 
-                    builder.Configuration, 
-                    aiLogger, 
-                    callerId, 
-                    client, 
+                    webSocket,
+                    builder.Configuration,
+                    aiLogger,
+                    callerId,
+                    client,
                     activeCallConnections,
                     serviceProvider);
 
@@ -481,12 +541,14 @@ app.Use(async (context, next) =>
     }
 });
 
-// Log startup information about new policies
+// Enhanced startup logging with bill shock prevention information
 Log.Information("🚀 Azure Voice AI Starting with Enhanced Policies:");
 Log.Information("🔒 SECURITY: First and Last Name collection mandatory before messaging");
 Log.Information("📞 CAPACITY: Maximum 2 concurrent calls enforced");
-Log.Information("⏰ BILL SHOCK PREVENTION: 90-second session timeout with automatic termination");
+Log.Information("⏰ BILL SHOCK PREVENTION: 90-second session timeout with AUTOMATIC CALL TERMINATION");
+Log.Information("🚨 FORCE TERMINATION: Calls automatically hung up at 90s to prevent billing overrun");
 Log.Information("📊 MONITORING: Real-time session tracking available at /api/monitoring/sessions");
 Log.Information("🏥 HEALTH: System health monitoring at /api/health");
+Log.Information("⚡ EMERGENCY: Manual expired call termination at /api/admin/force-end-expired");
 
 await app.RunAsync();

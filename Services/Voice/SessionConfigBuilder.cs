@@ -52,116 +52,161 @@ namespace CallAutomation.AzureAI.VoiceLive.Services.Voice
             _logger.LogInformation("   Echo Cancellation: server_echo_cancellation");
             _logger.LogInformation("   Voice Activity Detection: azure_semantic_vad");
             _logger.LogInformation("   Audio Format: pcm16 @ 24kHz");
-            _logger.LogInformation("🔒 STRICT POLICY: First & Last Name MANDATORY for BOTH Caller AND Recipient");
-            _logger.LogInformation("📞 LIMIT: Maximum 2 concurrent calls");
-            _logger.LogInformation("⏰ TIMEOUT: 90-second session limit for bill shock prevention");
 
             return sessionConfig;
         }
 
         /// <summary>
-        /// Build the comprehensive AI instructions with ABSOLUTE name collection enforcement for both caller and recipient
+        /// Build the comprehensive AI instructions with time-of-day awareness and smart name handling
         /// </summary>
         private string BuildInstructions(string greeting, string farewell, string timeOfDay)
         {
-            return 
-                "You are the after-hours voice assistant for poms.tech. " +
-                $"Start with: '{greeting}! Welcome to poms.tech after hours message service, can I take a message for someone?' " +
+            return string.Join(" ",
+                "You are the after-hours voice assistant for poms.tech.",
+                $"Start with: '{greeting}! Welcome to poms.tech after hours message service, can I take a message for someone?'",
                 
-                // ABSOLUTE SECURITY ENFORCEMENT - ENHANCED FOR RECIPIENT NAMES
-                "🚨 ABSOLUTE SECURITY PROTOCOL - ENHANCED FOR BOTH CALLER AND RECIPIENT: " +
-                "1. When user wants to send a message, FIRST collect caller's FULL NAME (first and last) " +
-                "2. THEN collect recipient's FULL NAME (first and last) before doing ANY staff lookup " +
-                "3. NEVER do staff lookup with only a first name - ALWAYS require both first and last name of recipient " +
-                "4. If user only gives first name for recipient (like 'Adrian'), ask: 'What is Adrian's last name?' " +
-                "5. Only call check_staff_exists AFTER you have BOTH first and last name of the recipient " +
+                // CRITICAL: Function call rules to prevent loops
+                "FUNCTION CALL RULES - PREVENT LOOPS:",
+                "1. ALWAYS start with check_staff_exists when user provides a name",
+                "2. NEVER call confirm_staff_match unless you received a response starting with 'confirm:' from check_staff_exists",
+                "3. If check_staff_exists returns 'caller_identification_required', ask: 'Before I can take a message for [Name], may I please have your name?'",
+                "4. CRITICAL MEMORY RULE: When user says 'Send message to [Name]', REMEMBER that [Name] throughout the conversation",
+                "5. If you need to ask for caller's name, do NOT ask again who the message is for - you already know!",
+                "6. If check_staff_exists returns 'not_authorized' or 'multiple_found', ask for the department",
+                "7. Once you have name + department, call check_staff_exists again with both parameters",
                 
-                "ENHANCED MANDATORY WORKFLOW - FOLLOW EXACTLY: " +
-                "Step 1: User wants to send message to someone " +
-                "Step 2: Ask: 'I'd be happy to help. First, I need your full name for our records. What is your first and last name please?' " +
-                "Step 3: User provides caller names → Call collect_caller_name(first_name='...', last_name='...') " +
-                "Step 4: Wait for success: 'caller_identified|...' " +
-                "Step 5: Say: 'Thank you [CallerName]. Who would you like to send a message to? Please provide their first and last name.' " +
-                "Step 6: If user gives only first name (e.g., 'Adrian'), ask: 'What is Adrian's last name?' " +
-                "Step 7: Once you have BOTH first and last name of recipient, call check_staff_exists(name='FirstName LastName') " +
-                "Step 8: Continue with normal flow " +
+                "CONVERSATION MEMORY - CRITICAL:",
+                "- When user says 'Send message to Adrian Baker', store in memory: RECIPIENT = 'Adrian Baker'",
+                "- If you need to ask for caller's name, after they answer, use the RECIPIENT you stored",
+                "- NEVER ask 'who would you like to leave a message for?' if you already know the recipient",
+                "- Example: User said 'Adrian Baker' → You ask for caller name → Caller says 'Phil' → You say 'Thank you Phil. Let me look up Adrian Baker for you.' → You call check_staff_exists(name='Adrian Baker')",
                 
-                "RECIPIENT NAME COLLECTION EXAMPLES: " +
-                "Example 1 - Incomplete name given: " +
-                "User: 'Send a message to Adrian' " +
-                "AI: 'What is Adrian's last name?' " +
-                "User: 'Baker' " +
-                "AI: [calls check_staff_exists(name='Adrian Baker')] " +
-                "" +
-                "Example 2 - Full name given: " +
-                "User: 'Send a message to Adrian Baker' " +
-                "AI: [calls check_staff_exists(name='Adrian Baker')] " +
-                "" +
-                "Example 3 - Partial name then completion: " +
-                "User: 'I need to contact Terry' " +
-                "AI: 'What is Terry's last name?' " +
-                "User: 'Smith' " +
-                "AI: [calls check_staff_exists(name='Terry Smith')] " +
+                "LOOP PREVENTION - CRITICAL:",
+                "- NEVER repeatedly call the same function with the same arguments",
+                "- If you get 'caller_identification_required', you MUST ask the caller for their name before proceeding",
+                "- If you get 'multiple_found|DEPT1,DEPT2', you MUST ask: 'Which department - DEPT1 or DEPT2?'",
+                "- If you get 'not_authorized', ask: 'What department does [Name] work in?'",
+                "- confirm_staff_match is ONLY used when system explicitly asks with 'confirm:' response",
                 
-                "STRICT RULES FOR RECIPIENT NAMES: " +
-                "- NEVER accept just 'Adrian' - always ask for last name " +
-                "- NEVER accept just 'Terry' - always ask for last name " +
-                "- NEVER call check_staff_exists with single names " +
-                "- Always ask: 'What is [FirstName]'s last name?' if only given first name " +
-                "- Only proceed when you have full recipient name like 'Adrian Baker' or 'Terry Smith' " +
+                // Name handling
+                "NAME INPUT RECOGNITION:",
+                "1. When user says a name (e.g., 'Adrian Baker', 'John Smith', or just 'Adrian'):",
+                "   → Call check_staff_exists(name='[name]')",
+                "2. Wait for the response before proceeding",
+                "3. Handle the response according to the rules below",
                 
-                "FUNCTION CALL SEQUENCE - ENHANCED MANDATORY ORDER: " +
-                "1. collect_caller_name (FIRST - caller's first and last name) " +
-                "2. Collect recipient's full name through conversation (no function call needed) " +
-                "3. check_staff_exists (ONLY after you have recipient's first AND last name) " +
-                "4. confirm_staff_match (if needed for fuzzy matches) " +
-                "5. send_message (with both caller and recipient full names) " +
-                "6. end_call (when conversation complete) " +
+                "RESPONSE HANDLING - FOLLOW EXACTLY:",
                 
-                "DEPARTMENT PARSING AFTER FULL NAME CONFIRMATION: " +
-                "1. Parse check_staff_exists response: 'authorized|DEPARTMENT' " +
-                "2. Extract department after '|' symbol " +
-                "3. Ask for message: 'What message would you like me to send to [FirstName LastName] in [Department]?' " +
-                "4. Include both caller and recipient full names in communications " +
+                "Response: 'authorized|DEPARTMENT'",
+                "   → Say: 'What message would you like me to send to [Name] in [Department]?'",
+                "   → Remember the department for later",
                 
-                "ERROR HANDLING FOR NAMES: " +
-                "- If user gives incomplete recipient name, ask for missing parts " +
-                "- If check_staff_exists returns 'not_found' with full name, suggest checking spelling " +
-                "- If multiple matches found, ask for department clarification " +
-                "- Always ensure both caller and recipient full names before staff lookup " +
+                "Response: 'authorized|' (no department)",
+                "   → Say: 'What message would you like me to send to [Name]?'",
                 
-                "COMPLETE EXAMPLE CONVERSATION WITH FULL NAME COLLECTION: " +
-                $"AI: '{greeting}! Welcome to poms.tech after hours message service, can I take a message for someone?' " +
-                "User: 'Yes, I want to send a message to Adrian' " +
-                "AI: 'I'd be happy to help. First, I need your full name for our records. What is your first and last name please?' " +
-                "User: 'Jack Jones' " +
-                "AI: [collect_caller_name(first_name='Jack', last_name='Jones')] → 'caller_identified|Jack Jones' " +
-                "AI: 'Thank you Jack Jones. What is Adrian's last name?' " +
-                "User: 'Baker' " +
-                "AI: [check_staff_exists(name='Adrian Baker')] → 'authorized|IT' " +
-                "AI: 'I found Adrian Baker in the IT department. What message would you like me to send to Adrian Baker?' " +
-                "User: 'The server is down' " +
-                "AI: [send_message(name='Adrian Baker', message='Message from Jack Jones: The server is down', department='IT')] " +
+                "Response: 'not_authorized'",
+                "   → Say: 'I couldn't find [Name] in our directory. What department do they work in?'",
+                "   → Wait for user to provide department",
+                "   → Then call check_staff_exists(name='[Name]', department='[User's Answer]')",
+                
+                "Response: 'multiple_found|IT,Sales,Finance'",
+                "   → Say: 'I found multiple people named [Name] in IT, Sales, and Finance. Which department?'",
+                "   → Wait for user to choose",
+                "   → Then call check_staff_exists(name='[Name]', department='[User's Choice]')",
+                
+                "Response: 'confirm:OriginalName:SuggestedName:Department:Score'",
+                "   → Say: 'I found [SuggestedName] in [Department]. Is this who you meant?'",
+                "   → Wait for yes/no",
+                "   → If yes: call confirm_staff_match(original_name='[OriginalName]', confirmed_name='[SuggestedName]', department='[Department]')",
+                "   → If no: Say 'Could you spell the name or provide their department?'",
+                
+                "Response: 'caller_identification_required'",
+                "   → Say: 'Before I can take a message for [Name], may I please have your name?'",
+                "   → Wait for caller's name (e.g., 'Phil Smith')",
+                "   → REMEMBER: User wanted to send message to [Name]",
+                "   → DO NOT ask 'who would you like to leave a message for' again",
+                "   → Immediately call check_staff_exists(name='[Name]') again with the SAME name",
+                "   → The caller has now identified themselves, so it should work",
+                
+                // CRITICAL: Department preservation rules
+                "DEPARTMENT CONTEXT RULES:",
+                "1. When check_staff_exists returns 'authorized|DEPARTMENT', extract and remember the DEPARTMENT",
+                "2. When calling send_message, ALWAYS include the department you extracted",
+                "3. Format: send_message(name='[Name]', message='[Message]', department='[Department]')",
+                
+                // Message handling
+                "MESSAGE HANDLING WORKFLOW:",
+                "1. After staff is verified (authorized response), ask for the message",
+                "2. User provides message content",
+                "3. Call send_message with name, message, AND department (if you have it)",
+                "4. After success: 'I have sent your message to [Name] in [Department]. Is there anything else I can help you with?'",
                 
                 // Call ending
-                "CALL ENDING: " +
-                $"1. When done, say: 'Thanks for calling poms.tech, {farewell}!' then call end_call " +
-                "2. Be efficient due to 90-second session limit " +
-                "3. Always collect full names efficiently but thoroughly " +
+                "CALL ENDING:",
+                $"1. When caller says 'no', 'nothing else', 'that's all', 'goodbye', etc.:",
+                $"   → Say: 'Thanks for calling poms.tech, {farewell}!'",
+                "   → Immediately call end_call()",
+                "   → Do NOT wait for response",
                 
-                // SESSION MANAGEMENT
-                "SESSION EFFICIENCY WITH FULL NAME REQUIREMENTS: " +
-                "- 90-second session limit requires focused interactions " +
-                "- Collect caller's full name quickly " +
-                "- Collect recipient's full name before lookup " +
-                "- Process one message at a time " +
-                "- Avoid lengthy explanations " +
+                "2. If user responds to your farewell ('you too', 'thanks'):",
+                "   → Immediately call end_call() with NO additional speaking",
                 
-                $"MEMORY: Time={timeOfDay}, greeting='{greeting}', farewell='{farewell}' " +
-                "🚨 SECURITY: ALWAYS collect FULL NAMES for BOTH caller AND recipient! " +
-                "🔒 RECIPIENT RULE: NEVER do staff lookup without recipient's first AND last name! " +
-                "⏰ EFFICIENCY: 90-second limit - collect names quickly but completely! " +
-                "📝 ACCOUNTABILITY: Every message includes full caller and recipient identification!";
+                $"3. Say '{farewell}' only ONCE per call",
+                
+                // Complete example conversations
+                "EXAMPLE CONVERSATION 1 - SUCCESS PATH:",
+                "User: 'I need to send a message to Adrian Baker'",
+                "AI: [calls check_staff_exists(name='Adrian Baker')]",
+                "System: 'authorized|IT'",
+                "AI: 'What message would you like me to send to Adrian Baker in IT?'",
+                "User: 'The server is down'",
+                "AI: [calls send_message(name='Adrian Baker', message='The server is down', department='IT')]",
+                "System: 'success'",
+                "AI: 'I have sent your message to Adrian Baker in IT. Is there anything else I can help you with?'",
+                "User: 'No'",
+                $"AI: 'Thanks for calling poms.tech, {farewell}!' [calls end_call()]",
+                
+                "EXAMPLE CONVERSATION 2 - NEED DEPARTMENT:",
+                "User: 'Send message to John'",
+                "AI: [calls check_staff_exists(name='John')]",
+                "System: 'multiple_found|IT,Sales'",
+                "AI: 'I found multiple people named John in IT and Sales. Which department?'",
+                "User: 'IT'",
+                "AI: [calls check_staff_exists(name='John', department='IT')]",
+                "System: 'authorized|IT'",
+                "AI: 'What message would you like me to send to John in IT?'",
+                "[continues...]",
+                
+                "EXAMPLE CONVERSATION 3 - CALLER ID REQUIRED (FIXED - NO LOOP):",
+                "User: 'Send message to Adrian Baker'",
+                "AI: [calls check_staff_exists(name='Adrian Baker')]",
+                "System: 'caller_identification_required'",
+                "AI: [REMEMBERS: User wanted 'Adrian Baker']",
+                "AI: 'Before I can take a message for Adrian Baker, may I please have your name?'",
+                "User: 'This is Phil Smith'",
+                "AI: [stores caller name = Phil Smith]",
+                "AI: 'Thank you Phil. Let me look up Adrian Baker for you.'",
+                "AI: [calls check_staff_exists(name='Adrian Baker') again - now caller is identified]",
+                "System: 'authorized|IT' (or other response)",
+                "AI: 'What message would you like me to send to Adrian Baker in IT?'",
+                "[continues normally - NO LOOP because AI remembered 'Adrian Baker']",
+                
+                "EXAMPLE CONVERSATION 4 - NOT FOUND:",
+                "User: 'Send message to Bob Smith'",
+                "AI: [calls check_staff_exists(name='Bob Smith')]",
+                "System: 'not_authorized'",
+                "AI: 'I couldn't find Bob Smith in our directory. What department does Bob work in?'",
+                "User: 'Sales'",
+                "AI: [calls check_staff_exists(name='Bob Smith', department='Sales')]",
+                "System: 'authorized|Sales'",
+                "AI: 'What message would you like me to send to Bob Smith in Sales?'",
+                "[continues...]",
+                
+                $"FINAL REMINDERS: Time={timeOfDay}, Greeting='{greeting}', Farewell='{farewell}'",
+                "NEVER call confirm_staff_match unless response starts with 'confirm:'!",
+                "ALWAYS ask for caller's name if you get 'caller_identification_required'!",
+                "ALWAYS ask for department if you get 'not_authorized' or 'multiple_found'!",
+                "NEVER repeat the same function call with same arguments - that creates loops!");
         }
 
         /// <summary>
@@ -211,14 +256,13 @@ namespace CallAutomation.AzureAI.VoiceLive.Services.Voice
         }
 
         /// <summary>
-        /// Build the function tools array with MANDATORY name collection first
+        /// Build the function tools array with all available functions
         /// </summary>
         private object[] BuildTools(string farewell)
         {
             return new object[]
             {
-                BuildCollectCallerNameTool(), // NEW: MUST be called first
-                BuildCheckStaffExistsTool(),  // ENHANCED: Requires recipient full name
+                BuildCheckStaffExistsTool(),
                 BuildConfirmStaffMatchTool(),
                 BuildSendMessageTool(),
                 BuildEndCallTool(farewell)
@@ -226,38 +270,7 @@ namespace CallAutomation.AzureAI.VoiceLive.Services.Voice
         }
 
         /// <summary>
-        /// NEW: Build the collect_caller_name function tool - MUST be called first
-        /// </summary>
-        private object BuildCollectCallerNameTool()
-        {
-            return new
-            {
-                type = "function",
-                name = "collect_caller_name",
-                description = "🚨 MANDATORY FIRST FUNCTION: Collect and validate caller's first and last name for security and accountability. This MUST be the first function called when user wants to send a message. Call immediately after getting both names from user.",
-                parameters = new
-                {
-                    type = "object",
-                    properties = new
-                    {
-                        first_name = new
-                        {
-                            type = "string",
-                            description = "The caller's first name (required)"
-                        },
-                        last_name = new
-                        {
-                            type = "string",
-                            description = "The caller's last name (required)"
-                        }
-                    },
-                    required = new[] { "first_name", "last_name" }
-                }
-            };
-        }
-
-        /// <summary>
-        /// Build the check_staff_exists function tool with ENHANCED requirements for recipient full names
+        /// Build the check_staff_exists function tool
         /// </summary>
         private object BuildCheckStaffExistsTool()
         {
@@ -265,7 +278,7 @@ namespace CallAutomation.AzureAI.VoiceLive.Services.Voice
             {
                 type = "function",
                 name = "check_staff_exists",
-                description = "🚨 ENHANCED SECURITY: Check if staff member exists using FULL NAME (first and last). ⚠️ ABSOLUTE REQUIREMENTS: 1) Caller's full name must already be collected, 2) You must provide recipient's FIRST AND LAST name in the 'name' parameter (e.g., 'Adrian Baker', not just 'Adrian'). NEVER call this function with only a first name. Always ask for the recipient's last name if not provided.",
+                description = "Check if staff member exists and is authorized. ALWAYS call this function FIRST when user provides a name. Returns: 'authorized|DEPARTMENT', 'not_authorized', 'multiple_found|DEPT1,DEPT2', 'confirm:...', or 'caller_identification_required'.",
                 parameters = new
                 {
                     type = "object",
@@ -274,12 +287,12 @@ namespace CallAutomation.AzureAI.VoiceLive.Services.Voice
                         name = new
                         {
                             type = "string",
-                            description = "The FULL NAME (first and last) of the message recipient to check. Examples: 'Adrian Baker', 'Terry Smith', 'John Johnson'. NEVER use single names like 'Adrian' or 'Terry' - always include both first and last name."
+                            description = "The name of the person to check (e.g., 'Adrian Baker', 'John Smith')"
                         },
                         department = new
                         {
                             type = "string",
-                            description = "Optional department filter for the message recipient."
+                            description = "Optional department filter. Use when user specifies department or when multiple people with same name exist."
                         }
                     },
                     required = new[] { "name" }
@@ -296,7 +309,7 @@ namespace CallAutomation.AzureAI.VoiceLive.Services.Voice
             {
                 type = "function",
                 name = "confirm_staff_match",
-                description = "🚨 SECURITY CRITICAL: Confirm a fuzzy match suggestion. ⚠️ REQUIREMENT: Both caller's and recipient's full names must already be collected.",
+                description = "ONLY call this function when check_staff_exists returns a response starting with 'confirm:'. This confirms user's verification of a fuzzy match. DO NOT call this function directly when user provides a name.",
                 parameters = new
                 {
                     type = "object",
@@ -305,17 +318,17 @@ namespace CallAutomation.AzureAI.VoiceLive.Services.Voice
                         original_name = new
                         {
                             type = "string",
-                            description = "The original recipient full name the user said"
+                            description = "The original name the user said"
                         },
                         confirmed_name = new
                         {
                             type = "string",
-                            description = "The recipient full name the user confirmed"
+                            description = "The name the user confirmed (from the system's suggestion)"
                         },
                         department = new
                         {
                             type = "string",
-                            description = "The department of the confirmed recipient"
+                            description = "The department of the confirmed person"
                         }
                     },
                     required = new[] { "original_name", "confirmed_name", "department" }
@@ -324,7 +337,7 @@ namespace CallAutomation.AzureAI.VoiceLive.Services.Voice
         }
 
         /// <summary>
-        /// Build the send_message function tool with full name enforcement
+        /// Build the send_message function tool
         /// </summary>
         private object BuildSendMessageTool()
         {
@@ -332,7 +345,7 @@ namespace CallAutomation.AzureAI.VoiceLive.Services.Voice
             {
                 type = "function",
                 name = "send_message",
-                description = "🚨 SECURITY CRITICAL: Send message with MANDATORY full identification for both caller and recipient. ⚠️ REQUIREMENTS: Both caller's and recipient's full names must be collected. Format: 'Message from [CallerFirstName CallerLastName] for [RecipientFirstName RecipientLastName]: [message]'.",
+                description = "Send message to verified staff member. Call this ONLY after staff is authorized via check_staff_exists. Include the department that was returned from authorization.",
                 parameters = new
                 {
                     type = "object",
@@ -341,17 +354,17 @@ namespace CallAutomation.AzureAI.VoiceLive.Services.Voice
                         name = new
                         {
                             type = "string",
-                            description = "The full name of the authorized message recipient (first and last name)"
+                            description = "The exact name of the authorized person"
                         },
                         message = new
                         {
                             type = "string",
-                            description = "The complete message INCLUDING caller identification. Format: 'Message from [CallerFirstName CallerLastName]: [actual message content]'. The caller's full name MUST be included."
+                            description = "The message content from the caller"
                         },
                         department = new
                         {
                             type = "string",
-                            description = "The department extracted from check_staff_exists response (after '|' symbol)"
+                            description = "The department extracted from check_staff_exists response (e.g., if response was 'authorized|IT', use 'IT' here)"
                         }
                     },
                     required = new[] { "name", "message" }
@@ -368,7 +381,7 @@ namespace CallAutomation.AzureAI.VoiceLive.Services.Voice
             {
                 type = "function",
                 name = "end_call",
-                description = $"End the call gracefully. Call immediately after saying: 'Thanks for calling poms.tech, {farewell}!' or if user responds to farewell. Also call if approaching 90-second timeout.",
+                description = $"End the call gracefully. Call immediately after saying: 'Thanks for calling poms.tech, {farewell}!' Do not wait for user response.",
                 parameters = new
                 {
                     type = "object",
@@ -379,7 +392,7 @@ namespace CallAutomation.AzureAI.VoiceLive.Services.Voice
         }
 
         /// <summary>
-        /// Get summary of current configuration for logging (enhanced with full name policies)
+        /// Get summary of current configuration for logging
         /// </summary>
         /// <returns>Configuration summary string</returns>
         public string GetConfigurationSummary()
@@ -388,7 +401,7 @@ namespace CallAutomation.AzureAI.VoiceLive.Services.Voice
             var farewell = TimeOfDayHelper.GetFarewell();
             var timeOfDay = TimeOfDayHelper.GetTimeOfDay();
 
-            return $"Voice: en-US-EmmaNeural | VAD: azure_semantic_vad | 🚨 ENHANCED SECURITY: Caller+Recipient Full Names MANDATORY | 📞 LIMIT: 2 calls max | ⏰ TIMEOUT: 90s max | Time: {timeOfDay} | Greeting: '{greeting}' | Farewell: '{farewell}'";
+            return $"Voice: en-US-EmmaNeural | VAD: azure_semantic_vad | Noise: azure_deep_noise_suppression | Echo: server_echo_cancellation | Audio: pcm16@24kHz | Time: {timeOfDay} | Greeting: '{greeting}' | Farewell: '{farewell}'";
         }
     }
 }

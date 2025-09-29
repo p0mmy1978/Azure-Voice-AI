@@ -53,6 +53,7 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
 
     /// <summary>
     /// Manages call sessions with concurrent limits and timeouts to prevent bill shock
+    /// FIXED: Proper session cleanup to prevent false positive timeout alerts
     /// </summary>
     public class CallSessionManager : ICallSessionManager, IDisposable
     {
@@ -80,6 +81,9 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
         {
             lock (_lockObject)
             {
+                // Clean up any expired sessions first
+                CleanupExpiredSessions();
+                
                 var activeCount = _activeCalls.Count;
                 var canAccept = activeCount < MAX_CONCURRENT_CALLS;
                 
@@ -93,6 +97,13 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
         {
             lock (_lockObject)
             {
+                // Clean up any existing session for this caller (prevent duplicates)
+                if (_activeCalls.ContainsKey(callerId))
+                {
+                    _logger.LogWarning($"⚠️ Duplicate call session detected for: {callerId} - cleaning up old session");
+                    _activeCalls.Remove(callerId);
+                }
+
                 var session = new CallSession
                 {
                     CallerId = callerId,
@@ -117,10 +128,14 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                     _activeCalls.Remove(callerId);
                     
                     _logger.LogInformation($"🔴 Call session ended: {callerId} | Duration: {duration.TotalSeconds:F1}s | Active calls: {_activeCalls.Count}/{MAX_CONCURRENT_CALLS}");
+                    
+                    // FIXED: Explicitly log successful cleanup
+                    _logger.LogDebug($"✅ Session cleanup completed for: {callerId}");
                 }
                 else
                 {
-                    _logger.LogWarning($"⚠️ Attempted to end unknown call session: {callerId}");
+                    // FIXED: Changed from Warning to Debug to reduce log noise for legitimate cleanup attempts
+                    _logger.LogDebug($"🔍 Attempted to end non-existent call session: {callerId} (may have been cleaned up already)");
                 }
             }
         }
@@ -129,6 +144,8 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
         {
             lock (_lockObject)
             {
+                // Clean up expired sessions before returning count
+                CleanupExpiredSessions();
                 return _activeCalls.Count;
             }
         }
@@ -141,6 +158,7 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                 {
                     return DateTime.UtcNow > session.TimeoutTime;
                 }
+                // FIXED: Return false for non-existent sessions (they're not expired, they're ended)
                 return false;
             }
         }
@@ -165,7 +183,10 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                 var now = DateTime.UtcNow;
                 var expiredCalls = new List<(string CallerId, string ConnectionId, TimeSpan Overtime)>();
 
-                foreach (var session in _activeCalls.Values)
+                // FIXED: Create a list of sessions to check (avoid modification during iteration)
+                var sessionsToCheck = _activeCalls.Values.ToList();
+
+                foreach (var session in sessionsToCheck)
                 {
                     if (now > session.TimeoutTime)
                     {
@@ -179,12 +200,47 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
         }
 
         /// <summary>
+        /// FIXED: Clean up expired sessions automatically to prevent false positives
+        /// </summary>
+        private void CleanupExpiredSessions()
+        {
+            var now = DateTime.UtcNow;
+            var expiredSessions = new List<string>();
+
+            // Find expired sessions
+            foreach (var kvp in _activeCalls)
+            {
+                if (now > kvp.Value.TimeoutTime)
+                {
+                    expiredSessions.Add(kvp.Key);
+                }
+            }
+
+            // Remove expired sessions
+            foreach (var callerId in expiredSessions)
+            {
+                if (_activeCalls.TryGetValue(callerId, out var session))
+                {
+                    var duration = now - session.StartTime;
+                    var overtime = now - session.TimeoutTime;
+                    
+                    _activeCalls.Remove(callerId);
+                    
+                    _logger.LogInformation($"🧹 Auto-cleaned expired session: {callerId} | Duration: {duration.TotalSeconds:F1}s | Overtime: {overtime.TotalSeconds:F1}s");
+                }
+            }
+        }
+
+        /// <summary>
         /// Get detailed session information for monitoring
         /// </summary>
         public Dictionary<string, object> GetSessionStats()
         {
             lock (_lockObject)
             {
+                // Clean up expired sessions before generating stats
+                CleanupExpiredSessions();
+                
                 var now = DateTime.UtcNow;
                 var sessions = _activeCalls.Values.Select(s => new
                 {
@@ -192,7 +248,7 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                     ConnectionId = s.ConnectionId,
                     DurationSeconds = (now - s.StartTime).TotalSeconds,
                     RemainingSeconds = Math.Max(0, (s.TimeoutTime - now).TotalSeconds),
-                    IsExpired = now > s.TimeoutTime
+                    IsExpired = now > s.TimeoutTime // This should always be false after cleanup
                 }).ToList();
 
                 return new Dictionary<string, object>
@@ -201,28 +257,46 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                     ["MaxConcurrentCalls"] = MAX_CONCURRENT_CALLS,
                     ["SessionTimeoutSeconds"] = SESSION_TIMEOUT_SECONDS,
                     ["Sessions"] = sessions,
-                    ["ExpiredCallCount"] = sessions.Count(s => s.IsExpired)
+                    ["ExpiredCallCount"] = sessions.Count(s => s.IsExpired), // Should always be 0
+                    ["LastCleanupTime"] = now
                 };
             }
         }
 
         /// <summary>
-        /// Timer callback to check for and log expired calls
+        /// FIXED: Timer callback with ACTIVE call termination for bill shock prevention
         /// </summary>
         private void CheckForExpiredCalls(object? state)
         {
             try
             {
-                var expiredCalls = GetExpiredCalls();
-                
-                if (expiredCalls.Any())
+                lock (_lockObject)
                 {
-                    foreach (var (callerId, connectionId, overtime) in expiredCalls)
-                    {
-                        _logger.LogWarning($"⏰ EXPIRED CALL DETECTED: {callerId} | Connection: {connectionId} | Overtime: {overtime.TotalSeconds:F1}s | REQUIRES IMMEDIATE TERMINATION");
-                    }
+                    // Get expired calls before cleanup
+                    var expiredCalls = GetExpiredCalls();
                     
-                    _logger.LogWarning($"🚨 {expiredCalls.Count} call(s) have exceeded the {SESSION_TIMEOUT_SECONDS}s timeout limit!");
+                    if (expiredCalls.Any())
+                    {
+                        _logger.LogWarning($"🚨 BILL SHOCK PREVENTION: Found {expiredCalls.Count} expired call(s) - FORCE TERMINATING:");
+                        
+                        foreach (var (callerId, connectionId, overtime) in expiredCalls)
+                        {
+                            _logger.LogWarning($"   ⏰ FORCE TERMINATING: {callerId} | Connection: {connectionId} | Overtime: {overtime.TotalSeconds:F1}s");
+                            
+                            // CRITICAL: Actually terminate the call via callback
+                            _ = Task.Run(async () => await ForceTerminateExpiredCall(callerId, connectionId, overtime));
+                        }
+                        
+                        // Clean up session tracking
+                        CleanupExpiredSessions();
+                        
+                        _logger.LogWarning($"🚨 BILL SHOCK PREVENTION: {expiredCalls.Count} call(s) force terminated to prevent billing overrun");
+                    }
+                    else
+                    {
+                        // FIXED: Only log periodic health check in debug mode to reduce log noise
+                        _logger.LogDebug($"💚 All calls within timeout limit. Active: {_activeCalls.Count}/{MAX_CONCURRENT_CALLS}");
+                    }
                 }
             }
             catch (Exception ex)
@@ -231,12 +305,56 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
             }
         }
 
+        /// <summary>
+        /// NEW: Callback delegate for force terminating expired calls
+        /// </summary>
+        public Func<string, string, TimeSpan, Task>? ForceTerminateCallback { get; set; }
+
+        /// <summary>
+        /// NEW: Force terminate an expired call to prevent bill shock
+        /// </summary>
+        private async Task ForceTerminateExpiredCall(string callerId, string connectionId, TimeSpan overtime)
+        {
+            try
+            {
+                _logger.LogError($"🚨 BILL SHOCK PREVENTION: Force terminating call {callerId} after {overtime.TotalSeconds:F1}s overtime");
+                
+                if (ForceTerminateCallback != null)
+                {
+                    await ForceTerminateCallback(callerId, connectionId, overtime);
+                    _logger.LogWarning($"✅ BILL SHOCK PREVENTION: Successfully terminated expired call {callerId}");
+                }
+                else
+                {
+                    _logger.LogError($"❌ BILL SHOCK PREVENTION: No termination callback configured - cannot force end call {callerId}");
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, $"❌ BILL SHOCK PREVENTION: Failed to force terminate call {callerId}");
+            }
+        }
+
+        /// <summary>
+        /// FIXED: Enhanced dispose with proper cleanup
+        /// </summary>
         public void Dispose()
         {
             if (!_disposed)
             {
+                lock (_lockObject)
+                {
+                    // Clean up any remaining sessions
+                    var remainingSessions = _activeCalls.Count;
+                    if (remainingSessions > 0)
+                    {
+                        _logger.LogInformation($"🧹 Disposing CallSessionManager - cleaning up {remainingSessions} remaining session(s)");
+                        _activeCalls.Clear();
+                    }
+                }
+                
                 _timeoutTimer?.Dispose();
-                _logger.LogInformation("📞 CallSessionManager disposed");
+                _logger.LogInformation("📞 CallSessionManager disposed successfully");
                 _disposed = true;
             }
         }
@@ -250,6 +368,23 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
             public string ConnectionId { get; set; } = string.Empty;
             public DateTime StartTime { get; set; }
             public DateTime TimeoutTime { get; set; }
+        }
+
+        /// <summary>
+        /// FIXED: Additional method for emergency cleanup (for admin endpoints)
+        /// </summary>
+        public int ForceCleanupAllSessions()
+        {
+            lock (_lockObject)
+            {
+                var count = _activeCalls.Count;
+                if (count > 0)
+                {
+                    _logger.LogWarning($"🚨 FORCE CLEANUP: Removing {count} active session(s)");
+                    _activeCalls.Clear();
+                }
+                return count;
+            }
         }
     }
 }

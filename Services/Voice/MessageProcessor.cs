@@ -231,11 +231,30 @@ namespace CallAutomation.AzureAI.VoiceLive.Services.Voice
             {
                 if (_isEndingCall)
                 {
-                    // ENHANCED: If we've sent a farewell, end the call regardless of other conditions
+                    // ENHANCED: If we've sent a farewell, wait for it to play completely
                     if (_farewellSent)
                     {
                         var timeSinceFarewell = DateTime.Now - _farewellTime;
-                        _logger.LogInformation($"🔚 AI farewell completed ({timeSinceFarewell.TotalMilliseconds:F0}ms ago) - ending call immediately");
+                        _logger.LogInformation($"🔚 AI farewell completed - time since start: {timeSinceFarewell.TotalMilliseconds:F0}ms");
+                        
+                        // Calculate remaining time to let audio play
+                        // A goodbye message typically takes 3-5 seconds to say
+                        var minimumPlayTime = TimeSpan.FromSeconds(5); // Increased from 3
+                        var remainingTime = minimumPlayTime - timeSinceFarewell;
+                        
+                        if (remainingTime.TotalMilliseconds > 0)
+                        {
+                            var delayMs = (int)remainingTime.TotalMilliseconds + 1000; // Extra 1 second buffer
+                            _logger.LogInformation($"⏱️ Waiting {delayMs}ms for goodbye to finish playing");
+                            await Task.Delay(delayMs);
+                        }
+                        else
+                        {
+                            _logger.LogInformation("⏱️ Goodbye should have finished playing, adding small buffer");
+                            await Task.Delay(1000); // Small buffer even if time elapsed
+                        }
+                        
+                        _logger.LogInformation("🔚 Ending call after goodbye completion");
                         return true; // Signal to end call
                     }
                     
@@ -286,15 +305,16 @@ namespace CallAutomation.AzureAI.VoiceLive.Services.Voice
         {
             try
             {
-                // ENHANCED: If farewell was sent, use shorter delay
+                // ENHANCED: If farewell was sent, use longer delay to ensure audio plays
                 if (_farewellSent)
                 {
                     var timeSinceFarewell = DateTime.Now - _farewellTime;
-                    var remainingTime = TimeSpan.FromSeconds(3) - timeSinceFarewell; // Shorter delay for farewell
+                    var minimumDuration = TimeSpan.FromSeconds(5); // Increased from 3
+                    var remainingTime = minimumDuration - timeSinceFarewell;
                     
                     var delay = remainingTime.TotalMilliseconds > 0 
-                        ? (int)remainingTime.TotalMilliseconds + 500  // Add small buffer
-                        : 500; // Minimum delay
+                        ? (int)remainingTime.TotalMilliseconds + 1000  // Add 1 second buffer
+                        : 1000; // Minimum 1 second delay
                         
                     _logger.LogDebug($"🔚 Calculated farewell delay: {delay}ms (time since farewell: {timeSinceFarewell.TotalMilliseconds:F0}ms)");
                     return delay;
@@ -304,19 +324,19 @@ namespace CallAutomation.AzureAI.VoiceLive.Services.Voice
                 if (_goodbyeMessageStarted)
                 {
                     var elapsed = DateTime.Now - _goodbyeStartTime;
-                    var estimatedDuration = TimeSpan.FromSeconds(5);
+                    var estimatedDuration = TimeSpan.FromSeconds(6); // Increased from 5
                     var remaining = estimatedDuration - elapsed;
                     
                     return remaining.TotalMilliseconds > 0 
-                        ? (int)remaining.TotalMilliseconds + 1500 
-                        : 1000;
+                        ? (int)remaining.TotalMilliseconds + 1500 // Increased buffer
+                        : 1500; // Increased minimum
                 }
-                return 6000; // Default fallback
+                return 7000; // Increased default fallback from 6000
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "❌ Error calculating goodbye delay");
-                return 1500; // Shorter default fallback to prevent long delays
+                return 3000; // Increased error fallback
             }
         }
 

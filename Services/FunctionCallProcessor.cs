@@ -10,6 +10,9 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
         private readonly IEmailService _emailService;
         private readonly ILogger<FunctionCallProcessor> _logger;
 
+        // NEW: Track caller name collection state per call
+        private readonly Dictionary<string, CallerInfo> _callerInfoCache = new();
+
         public FunctionCallProcessor(
             IStaffLookupService staffLookupService,
             IEmailService emailService,
@@ -28,10 +31,11 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
             {
                 return functionName switch
                 {
+                    "collect_caller_name" => HandleCollectCallerName(arguments, callerId),
                     "check_staff_exists" => await HandleCheckStaffExists(arguments, callerId),
                     "confirm_staff_match" => await HandleConfirmStaffMatch(arguments, callerId),
                     "send_message" => await HandleSendMessage(arguments, callerId),
-                    "end_call" => HandleEndCall(),
+                    "end_call" => HandleEndCall(callerId),
                     _ => new FunctionCallResult
                     {
                         Success = false,
@@ -87,9 +91,81 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
             }
         }
 
+        private FunctionCallResult HandleCollectCallerName(string arguments, string callerId)
+        {
+            _logger.LogInformation($"📝 collect_caller_name called with args: {arguments}");
+
+            try
+            {
+                var parsed = JsonDocument.Parse(arguments);
+                var firstName = parsed.RootElement.GetProperty("first_name").GetString()?.Trim();
+                var lastName = parsed.RootElement.GetProperty("last_name").GetString()?.Trim();
+
+                if (string.IsNullOrWhiteSpace(firstName) || string.IsNullOrWhiteSpace(lastName))
+                {
+                    _logger.LogWarning($"⚠️ Incomplete name collection: first='{firstName}', last='{lastName}'");
+                    return new FunctionCallResult
+                    {
+                        Success = false,
+                        Output = "incomplete_name",
+                        ErrorMessage = "Both first and last names are required"
+                    };
+                }
+
+                _callerInfoCache[callerId] = new CallerInfo 
+                { 
+                    FirstName = firstName!, 
+                    LastName = lastName!,
+                    CollectedAt = DateTime.UtcNow
+                };
+                
+                _logger.LogInformation($"✅ Caller information collected and stored: {firstName} {lastName} for call: {callerId}");
+
+                return new FunctionCallResult
+                {
+                    Success = true,
+                    Output = $"caller_identified|{firstName} {lastName}"
+                };
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "🔴 Error in HandleCollectCallerName");
+                return new FunctionCallResult
+                {
+                    Success = false,
+                    Output = "error",
+                    ErrorMessage = ex.Message
+                };
+            }
+        }
+
+        private bool ValidateCallerIdentification(string callerId, string functionName)
+        {
+            if (!_callerInfoCache.TryGetValue(callerId, out var callerInfo) || 
+                string.IsNullOrWhiteSpace(callerInfo.FirstName) || 
+                string.IsNullOrWhiteSpace(callerInfo.LastName))
+            {
+                _logger.LogError($"🚨 SECURITY VIOLATION: {functionName} called without caller identification for: {callerId}");
+                return false;
+            }
+
+            _logger.LogInformation($"✅ Caller validation passed: {callerInfo.FirstName} {callerInfo.LastName} for {functionName}");
+            return true;
+        }
+
         private async Task<FunctionCallResult> HandleCheckStaffExists(string arguments, string callerId)
         {
             _logger.LogInformation($"🔍 check_staff_exists called with args: {arguments}");
+
+            if (!ValidateCallerIdentification(callerId, "check_staff_exists"))
+            {
+                return new FunctionCallResult
+                {
+                    Success = false,
+                    Output = "caller_identification_required",
+                    ErrorMessage = "Must call collect_caller_name first to get caller's full name before staff lookup"
+                };
+            }
 
             try
             {
@@ -98,11 +174,11 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                 var department = parsed.RootElement.TryGetProperty("department", out var deptElement) ? 
                     deptElement.GetString() : null;
 
-                _logger.LogInformation($"🔍 Checking staff: name={name}, department={department}");
+                var callerInfo = _callerInfoCache[callerId];
+                _logger.LogInformation($"🔍 Checking staff: name={name}, department={department}, caller={callerInfo.FullName}");
 
                 var result = await _staffLookupService.CheckStaffExistsAsync(name!, department);
 
-                // Enhanced output to include department information for authorized users
                 string output = result.Status switch
                 {
                     StaffLookupStatus.Authorized => CreateAuthorizedOutput(result, name!, department),
@@ -135,10 +211,7 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
 
         private string CreateAuthorizedOutput(StaffLookupResult result, string name, string? requestedDepartment)
         {
-            // Priority: SuggestedDepartment from result, then requested department, then empty
             var department = result.SuggestedDepartment ?? requestedDepartment ?? "";
-            
-            // Clean up department string
             department = department?.Trim() ?? "";
             
             _logger.LogInformation($"🔍 Creating authorized output: name='{name}', department='{department}' (suggested: '{result.SuggestedDepartment}', requested: '{requestedDepartment}')");
@@ -160,6 +233,16 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
         {
             _logger.LogInformation($"✅ confirm_staff_match called with args: {arguments}");
 
+            if (!ValidateCallerIdentification(callerId, "confirm_staff_match"))
+            {
+                return new FunctionCallResult
+                {
+                    Success = false,
+                    Output = "caller_identification_required",
+                    ErrorMessage = "Must call collect_caller_name first before staff confirmation"
+                };
+            }
+
             try
             {
                 var parsed = JsonDocument.Parse(arguments);
@@ -167,9 +250,9 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                 var confirmedName = parsed.RootElement.GetProperty("confirmed_name").GetString();
                 var department = parsed.RootElement.GetProperty("department").GetString();
 
-                _logger.LogInformation($"✅ User confirmed: '{originalName}' -> '{confirmedName}' in {department}");
+                var callerInfo = _callerInfoCache[callerId];
+                _logger.LogInformation($"✅ User {callerInfo.FullName} confirmed: '{originalName}' -> '{confirmedName}' in {department}");
 
-                // Cast to concrete service to access the new confirmation method
                 if (_staffLookupService is StaffLookupService concreteService)
                 {
                     var result = await concreteService.ConfirmFuzzyMatchAsync(originalName!, confirmedName!, department!);
@@ -216,6 +299,16 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
         {
             _logger.LogInformation($"📧 send_message called with args: {arguments}");
 
+            if (!ValidateCallerIdentification(callerId, "send_message"))
+            {
+                return new FunctionCallResult
+                {
+                    Success = false,
+                    Output = "caller_identification_required",
+                    ErrorMessage = "Must call collect_caller_name first before sending messages"
+                };
+            }
+
             try
             {
                 var parsed = JsonDocument.Parse(arguments);
@@ -224,28 +317,34 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                 var department = parsed.RootElement.TryGetProperty("department", out var deptElement) ? 
                     deptElement.GetString() : null;
 
-                _logger.LogInformation($"📧 Parsed: name={name}, message={message}, department={department}");
+                var callerInfo = _callerInfoCache[callerId];
+                var callerFullName = callerInfo.FullName;
+                
+                _logger.LogInformation($"📧 Parsed: name={name}, message={message}, department={department}, caller={callerFullName}");
 
-                // Log warning if department is missing (this helps debug the AI behavior)
+                if (!message!.Contains(callerFullName))
+                {
+                    _logger.LogInformation($"📧 Adding caller identification to message: {callerFullName}");
+                    message = $"Message from {callerFullName}: {message}";
+                }
+
                 if (string.IsNullOrWhiteSpace(department))
                 {
                     _logger.LogWarning($"⚠️ send_message called without department for: {name}. This may cause lookup issues if there are multiple staff with the same name.");
                 }
 
-                // Get staff email using the lookup service
                 var email = await _staffLookupService.GetStaffEmailAsync(name!, department);
 
                 if (!string.IsNullOrWhiteSpace(email))
                 {
-                    _logger.LogInformation($"✅ Sending email to: {name}, email: {email}");
+                    _logger.LogInformation($"✅ Sending email to: {name}, email: {email}, from caller: {callerFullName}");
                     
-                    // Send the email
                     var emailSuccess = await _emailService.SendMessageEmailAsync(name!, email, message!, callerId);
                     
                     if (emailSuccess)
                     {
                         var deptInfo = !string.IsNullOrWhiteSpace(department) ? $" in {department}" : "";
-                        _logger.LogInformation($"✅ Email sent successfully to {name}{deptInfo}");
+                        _logger.LogInformation($"✅ Email sent successfully to {name}{deptInfo} from {callerFullName}");
                         return new FunctionCallResult
                         {
                             Success = true,
@@ -254,7 +353,7 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                     }
                     else
                     {
-                        _logger.LogWarning($"❌ Failed to send email to {name}");
+                        _logger.LogWarning($"❌ Failed to send email to {name} from {callerFullName}");
                         return new FunctionCallResult
                         {
                             Success = false,
@@ -284,9 +383,10 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
             }
         }
 
-        private FunctionCallResult HandleEndCall()
+        private FunctionCallResult HandleEndCall(string callerId)
         {
             _logger.LogInformation("🔚 end_call function triggered");
+            CleanupCallerInfo(callerId);
 
             return new FunctionCallResult
             {
@@ -295,5 +395,28 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                 ShouldEndCall = true
             };
         }
+
+        public void CleanupCallerInfo(string callerId)
+        {
+            if (_callerInfoCache.Remove(callerId))
+            {
+                _logger.LogInformation($"🧹 Cleaned up caller info for: {callerId}");
+            }
+        }
+
+        public CallerInfo? GetCallerInfo(string callerId)
+        {
+            return _callerInfoCache.TryGetValue(callerId, out var info) ? info : null;
+        }
+    }
+
+    public class CallerInfo
+    {
+        public string FirstName { get; set; } = string.Empty;
+        public string LastName { get; set; } = string.Empty;
+        public DateTime CollectedAt { get; set; }
+        
+        public string FullName => $"{FirstName} {LastName}";
+        public bool IsComplete => !string.IsNullOrWhiteSpace(FirstName) && !string.IsNullOrWhiteSpace(LastName);
     }
 }

@@ -36,10 +36,9 @@ public class AcsMediaStreamingHandler
         m_activeCallConnections = activeCallConnections;
         _serviceProvider = serviceProvider;
         
-        m_logger.LogInformation($"🔗 AcsMediaStreamingHandler initialized with Caller ID: {m_callerId}");
+        m_logger.LogInformation($"🔗 WebSocket connection established with Caller ID: {m_callerId}");
     }
 
-    // NEW: Expose service provider for dependency access
     public IServiceProvider GetServiceProvider() => _serviceProvider;
 
     public async Task ProcessWebSocketAsync()
@@ -49,22 +48,25 @@ public class AcsMediaStreamingHandler
             return;
         }
 
-        // Get call session manager to check limits and timeouts
         var sessionManager = _serviceProvider.GetRequiredService<ICallSessionManager>();
         
-        // Verify call can still proceed (in case of race conditions)
-        if (!sessionManager.CanAcceptNewCall())
+        // FIXED: Check if THIS SPECIFIC call has expired, not if we can accept NEW calls
+        // The session was already started in Program.cs, so we just verify it's still valid
+        if (sessionManager.IsCallExpired(m_callerId))
         {
-            m_logger.LogWarning($"🚫 Call rejected during WebSocket setup - limit exceeded: {m_callerId}");
+            m_logger.LogWarning($"⏰ WebSocket connection attempted for expired session: {m_callerId}");
             await CloseNormalWebSocketAsync();
             return;
         }
 
-        // Log session timeout information
+        // Log session information
         var remainingTime = sessionManager.GetRemainingTime(m_callerId);
-        m_logger.LogInformation($"⏰ Session timeout: {remainingTime.TotalSeconds:F1}s remaining for: {m_callerId}");
+        var activeCallCount = sessionManager.GetActiveCallCount();
+        m_logger.LogInformation($"⏰ WebSocket connected with {remainingTime.TotalSeconds:F0}s remaining for: {m_callerId}");
+        m_logger.LogInformation($"📊 Active calls: {activeCallCount}/2");
+        m_logger.LogWarning($"🚨 BILL SHOCK PREVENTION: Call will be force terminated if it exceeds 90s total duration");
 
-        // OPTIMIZED: Get all services upfront to avoid delays during processing
+        // Get all services upfront
         var staffLookupService = _serviceProvider.GetRequiredService<IStaffLookupService>();
         var emailService = _serviceProvider.GetRequiredService<IEmailService>();
         var callManagementService = _serviceProvider.GetRequiredService<ICallManagementService>();
@@ -75,15 +77,15 @@ public class AcsMediaStreamingHandler
         
         m_logger.LogInformation("🔧 All services resolved from DI container");
         
-        // OPTIMIZED: Start email initialization asynchronously (don't wait for it)
+        // Start email initialization asynchronously
         var emailInitTask = emailService.InitializeAsync();
         m_logger.LogInformation("📧 Email service initialization started asynchronously");
 
-        // OPTIMIZED: Initialize call management immediately
+        // Initialize call management
         callManagementService.Initialize(m_callAutomationClient, m_activeCallConnections);
         m_logger.LogInformation("📞 Call management service initialized");
 
-        // OPTIMIZED: Create AI service handler immediately (don't wait for email init)
+        // Create AI service handler
         m_logger.LogInformation("🤖 Creating AzureVoiceLiveService...");
         m_aiServiceHandler = new AzureVoiceLiveService(
             this, 
@@ -102,11 +104,9 @@ public class AcsMediaStreamingHandler
 
         try
         {
-            // OPTIMIZED: Start WebSocket processing and email init in parallel
             var webSocketTask = StartReceivingFromAcsMediaWebSocket();
             m_logger.LogInformation("🎧 WebSocket audio processing started");
             
-            // Ensure email service is ready (but don't block the main flow)
             _ = Task.Run(async () =>
             {
                 try
@@ -120,7 +120,6 @@ public class AcsMediaStreamingHandler
                 }
             });
             
-            // Wait for the WebSocket processing to complete
             await webSocketTask;
         }
         catch (Exception ex)
@@ -132,7 +131,6 @@ public class AcsMediaStreamingHandler
         {
             m_logger.LogInformation("🛑 Cleaning up AcsMediaStreamingHandler...");
             
-            // NEW: End the call session tracking
             try
             {
                 var callSessionManager = _serviceProvider.GetRequiredService<ICallSessionManager>();
@@ -159,7 +157,6 @@ public class AcsMediaStreamingHandler
         {
             try
             {
-                // NEW: Check if session has expired before sending
                 var callSessionManager = _serviceProvider.GetRequiredService<ICallSessionManager>();
                 if (callSessionManager.IsCallExpired(m_callerId))
                 {
@@ -168,11 +165,8 @@ public class AcsMediaStreamingHandler
                 }
 
                 byte[] jsonBytes = Encoding.UTF8.GetBytes(message);
-
-                // Send the PCM audio chunk over WebSocket
                 await m_webSocket.SendAsync(new ArraySegment<byte>(jsonBytes), WebSocketMessageType.Text, endOfMessage: true, CancellationToken.None);
                 
-                // OPTIMIZED: Only log debug messages for audio data to reduce log spam
                 if (message.Contains("AudioData"))
                 {
                     m_logger.LogDebug($"📊 Audio data sent: {jsonBytes.Length} bytes");
@@ -248,7 +242,6 @@ public class AcsMediaStreamingHandler
     {
         try
         {
-            // NEW: Check session timeout before processing audio
             var callSessionManager = _serviceProvider.GetRequiredService<ICallSessionManager>();
             if (callSessionManager.IsCallExpired(m_callerId))
             {
@@ -261,13 +254,11 @@ public class AcsMediaStreamingHandler
             {
                 if (!audioData.IsSilent)
                 {
-                    // OPTIMIZED: Process audio data without blocking
                     if (m_aiServiceHandler != null)
                     {
                         await m_aiServiceHandler.SendAudioToExternalAI(audioData.Data.ToArray());
                     }
                     
-                    // Only log every 100th audio packet to reduce log spam
                     if (audioData.Data.Length > 0 && audioData.Data.Length % 100 == 0)
                     {
                         m_logger.LogDebug($"🎤 Audio data sent to AI: {audioData.Data.Length} bytes");
@@ -281,7 +272,6 @@ public class AcsMediaStreamingHandler
         }
     }
 
-    // OPTIMIZED: Receive messages from WebSocket with better error handling and performance
     private async Task StartReceivingFromAcsMediaWebSocket()
     {
         if (m_webSocket == null)
@@ -294,8 +284,7 @@ public class AcsMediaStreamingHandler
         {
             m_logger.LogInformation("🎧 Starting to receive audio data from ACS WebSocket...");
             
-            // OPTIMIZED: Use larger buffer for better performance
-            const int bufferSize = 4096; // Increased from 2048
+            const int bufferSize = 4096;
             byte[] receiveBuffer = new byte[bufferSize];
             
             var callSessionManager = _serviceProvider.GetRequiredService<ICallSessionManager>();
@@ -304,7 +293,6 @@ public class AcsMediaStreamingHandler
             {
                 try
                 {
-                    // NEW: Check session timeout before processing
                     if (callSessionManager.IsCallExpired(m_callerId))
                     {
                         m_logger.LogWarning($"⏰ Session expired - stopping WebSocket processing for: {m_callerId}");
@@ -325,7 +313,6 @@ public class AcsMediaStreamingHandler
                     {
                         string data = Encoding.UTF8.GetString(receiveBuffer, 0, receiveResult.Count);
                         
-                        // OPTIMIZED: Process audio data asynchronously without awaiting
                         _ = Task.Run(async () =>
                         {
                             try
@@ -357,13 +344,11 @@ public class AcsMediaStreamingHandler
                 {
                     m_logger.LogError(ex, "❌ Error receiving data from WebSocket");
                     
-                    // If we get repeated errors, break the loop to avoid infinite error spam
                     if (m_webSocket.State != WebSocketState.Open)
                     {
                         break;
                     }
                     
-                    // Small delay before retrying to avoid tight error loops
                     await Task.Delay(100, m_cts.Token);
                 }
             }

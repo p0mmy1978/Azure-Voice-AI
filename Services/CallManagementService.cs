@@ -31,7 +31,6 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                 return false;
             }
 
-            // Prevent multiple hangups for the same caller
             if (_hungUpCalls.Contains(callerId))
             {
                 _logger.LogInformation($"📞 Call already hung up for caller: {callerId}");
@@ -49,8 +48,13 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                     var callConnection = _callAutomationClient.GetCallConnection(callConnectionId);
                     await callConnection.HangUpAsync(forEveryone: true);
                     
-                    // Mark this call as hung up
                     _hungUpCalls.Add(callerId);
+                    
+                    bool removed = _activeCallConnections.Remove(callerId);
+                    if (removed)
+                    {
+                        _logger.LogDebug($"🧹 Removed CallConnectionId from active connections for caller: {callerId}");
+                    }
                     
                     _logger.LogInformation($"✅ Successfully hung up ACS call: {callConnectionId} for caller: {callerId}");
                     return true;
@@ -75,8 +79,7 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                 return false;
             }
 
-            // Check if we have an active connection and haven't hung up yet
-            var hasActiveConnection = _activeCallConnections.Values.Any();
+            var hasActiveConnection = _activeCallConnections.ContainsKey(callerId);
             var isHungUp = _hungUpCalls.Contains(callerId);
             
             return hasActiveConnection && !isHungUp;
@@ -89,9 +92,8 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                 return null;
             }
 
-            // For now, return the first available connection ID
-            // In a more complex scenario, you might need to map callerIds to specific connection IDs
-            return _activeCallConnections.Values.FirstOrDefault();
+            _activeCallConnections.TryGetValue(callerId, out var connectionId);
+            return connectionId;
         }
     }
 }

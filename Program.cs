@@ -34,8 +34,8 @@ ArgumentNullException.ThrowIfNullOrEmpty(acsConnectionString);
 //Call Automation Client
 var client = new CallAutomationClient(acsConnectionString);
 
-// Dictionary to track active call connections for hangup
-var activeCallConnections = new Dictionary<string, string>(); // contextId -> callConnectionId
+// FIXED: Dictionary to track callerId -> callConnectionId mapping (not contextId -> callConnectionId)
+var activeCallConnections = new Dictionary<string, string>(); // callerId -> callConnectionId
 
 // Register existing services for dependency injection
 builder.Services.AddScoped<IStaffLookupService, StaffLookupService>();
@@ -195,7 +195,7 @@ app.MapPost("/api/incomingCall", async (
     return Results.Ok();
 });
 
-// api to handle call back events - captures CallConnectionId
+// FIXED: api to handle call back events - now properly maps callerId to CallConnectionId
 app.MapPost("/api/callbacks/{contextId}", async (
     [FromBody] CloudEvent[] cloudEvents,
     [FromRoute] string contextId,
@@ -208,11 +208,11 @@ app.MapPost("/api/callbacks/{contextId}", async (
         CallAutomationEventBase @event = CallAutomationEventParser.Parse(cloudEvent);
         logger.LogInformation($"Event received: {JsonConvert.SerializeObject(@event, Formatting.Indented)}");
 
-        // Capture CallConnectionId for hangup later
+        // FIXED: Capture CallConnectionId and map to callerId (not contextId)
         if (@event is CallConnected callConnectedEvent)
         {
-            activeCallConnections[contextId] = callConnectedEvent.CallConnectionId;
-            logger.LogInformation($"Call connected - storing CallConnectionId: {callConnectedEvent.CallConnectionId} for context: {contextId}");
+            activeCallConnections[callerId] = callConnectedEvent.CallConnectionId;
+            logger.LogInformation($"Call connected - storing CallConnectionId: {callConnectedEvent.CallConnectionId} for caller: {callerId}");
 
             // Log session information with bill shock prevention warning
             var remainingTime = callSessionManager.GetRemainingTime(callerId);
@@ -221,8 +221,16 @@ app.MapPost("/api/callbacks/{contextId}", async (
         }
         else if (@event is CallDisconnected callDisconnectedEvent)
         {
-            activeCallConnections.Remove(contextId);
-            logger.LogInformation($"Call disconnected - removed CallConnectionId for context: {contextId}");
+            // FIXED: Remove by callerId (not contextId)
+            bool removed = activeCallConnections.Remove(callerId);
+            if (removed)
+            {
+                logger.LogInformation($"Call disconnected - removed CallConnectionId for caller: {callerId}");
+            }
+            else
+            {
+                logger.LogWarning($"Call disconnected - CallConnectionId not found for caller: {callerId} (may have been already removed)");
+            }
 
             // End call session tracking
             callSessionManager.EndCallSession(callerId);
@@ -550,5 +558,6 @@ Log.Information("🚨 FORCE TERMINATION: Calls automatically hung up at 90s to p
 Log.Information("📊 MONITORING: Real-time session tracking available at /api/monitoring/sessions");
 Log.Information("🏥 HEALTH: System health monitoring at /api/health");
 Log.Information("⚡ EMERGENCY: Manual expired call termination at /api/admin/force-end-expired");
+Log.Information("🔧 FIX APPLIED: CallerId to CallConnectionId mapping corrected to prevent cross-call hangups");
 
 await app.RunAsync();

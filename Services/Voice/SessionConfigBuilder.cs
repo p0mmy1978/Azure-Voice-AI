@@ -1,5 +1,6 @@
 using CallAutomation.AzureAI.VoiceLive.Helpers;
 using Microsoft.Extensions.Logging;
+using System.Text.Json;
 
 namespace CallAutomation.AzureAI.VoiceLive.Services.Voice
 {
@@ -46,7 +47,29 @@ namespace CallAutomation.AzureAI.VoiceLive.Services.Voice
                 }
             };
 
-            // Enhanced logging for audio enhancement verification
+            // ENHANCED VERIFICATION LOGGING - Using LogWarning to ensure visibility in production
+            _logger.LogWarning("═══════════════════════════════════════════════");
+            _logger.LogWarning("🔊 AUDIO ENHANCEMENT CONFIGURATION VERIFICATION");
+            _logger.LogWarning("═══════════════════════════════════════════════");
+            
+            // Serialize to inspect the actual configuration
+            var turnDetection = BuildTurnDetection();
+            var noiseReduction = BuildNoiseReduction();
+            var echoCancellation = BuildEchoCancellation();
+            
+            _logger.LogWarning($"✅ Noise Reduction Type: azure_deep_noise_suppression");
+            _logger.LogWarning($"✅ Echo Cancellation Type: server_echo_cancellation");
+            _logger.LogWarning($"✅ VAD Type: azure_semantic_vad");
+            _logger.LogWarning($"✅ VAD Threshold: 0.4");
+            _logger.LogWarning($"✅ VAD Prefix Padding: 150ms");
+            _logger.LogWarning($"✅ VAD Silence Duration: 150ms");
+            _logger.LogWarning($"✅ VAD Remove Filler Words: true");
+            _logger.LogWarning($"✅ Audio Format: pcm16 @ 24000Hz");
+            _logger.LogWarning($"✅ Voice: en-US-EmmaNeural");
+            _logger.LogWarning($"✅ Voice Temperature: {voiceTemperature}");
+            _logger.LogWarning("═══════════════════════════════════════════════");
+
+            // Original detailed logging (kept for backward compatibility)
             _logger.LogInformation("Audio Enhancement Settings:");
             _logger.LogInformation("   Noise Reduction: azure_deep_noise_suppression");
             _logger.LogInformation("   Echo Cancellation: server_echo_cancellation");

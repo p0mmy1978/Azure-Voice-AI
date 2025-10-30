@@ -25,19 +25,16 @@ jobs:
         with:
           dotnet-version: '8.x'
 
+      
       - name: Restore & Build
         run: |
           dotnet restore
           dotnet build --configuration Release --no-restore
 
-      # IMPORTANT: publish the PROJECT (csproj), not the solution
-      # Update the path below if your csproj is elsewhere.
       - name: Publish app
         run: |
-          dotnet publish ./CallAutomation_AzureAI_VoiceLive/CallAutomation_AzureAI_VoiceLive.csproj \
-            -c Release -o ./publish --no-build
+          dotnet publish ./CallAutomation_AzureAI_VoiceLive.csproj -c Release -o ./publish --no-build
 
-      # Zip for faster upload (fewer files)
       - name: Archive package
         run: |
           cd publish
@@ -59,3 +56,4 @@ jobs:
           package: app.zip
 
           
+

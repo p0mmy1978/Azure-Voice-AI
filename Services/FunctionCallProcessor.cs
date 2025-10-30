@@ -10,8 +10,11 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
         private readonly IEmailService _emailService;
         private readonly ILogger<FunctionCallProcessor> _logger;
 
-        // NEW: Track caller name collection state per call
+        // Track caller name collection state per call
         private readonly Dictionary<string, CallerInfo> _callerInfoCache = new();
+        
+        // NEW: Cache for name corrections from fuzzy matching
+        private readonly Dictionary<string, NameCorrection> _nameCorrections = new();
 
         public FunctionCallProcessor(
             IStaffLookupService staffLookupService,
@@ -179,6 +182,24 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
 
                 var result = await _staffLookupService.CheckStaffExistsAsync(name!, department);
 
+                // NEW: Store name correction if fuzzy match was used
+                if (result.Status == StaffLookupStatus.Authorized && 
+                    !string.IsNullOrEmpty(result.SuggestedName) &&
+                    !string.Equals(name, result.SuggestedName, StringComparison.OrdinalIgnoreCase))
+                {
+                    var correctionKey = CreateCorrectionKey(callerId, name!);
+                    _nameCorrections[correctionKey] = new NameCorrection
+                    {
+                        OriginalName = name!,
+                        CorrectedName = result.SuggestedName,
+                        Department = result.SuggestedDepartment ?? department,
+                        Email = result.Email,
+                        CorrectedAt = DateTime.UtcNow
+                    };
+                    
+                    _logger.LogInformation($"✅ Stored name correction: '{name}' → '{result.SuggestedName}' in {result.SuggestedDepartment}");
+                }
+
                 string output = result.Status switch
                 {
                     StaffLookupStatus.Authorized => CreateAuthorizedOutput(result, name!, department),
@@ -320,7 +341,27 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                 var callerInfo = _callerInfoCache[callerId];
                 var callerFullName = callerInfo.FullName;
                 
-                _logger.LogInformation($"📧 Parsed: name={name}, message={message}, department={department}, caller={callerFullName}");
+                // NEW: Check if we have a corrected name from fuzzy matching
+                var correctionKey = CreateCorrectionKey(callerId, name!);
+                string actualName = name!;
+                string? actualEmail = null;
+                string? actualDepartment = department;
+                
+                if (_nameCorrections.TryGetValue(correctionKey, out var correction))
+                {
+                    actualName = correction.CorrectedName;
+                    actualEmail = correction.Email;
+                    actualDepartment = correction.Department ?? department;
+                    
+                    _logger.LogInformation($"🔄 Using corrected name: '{name}' → '{actualName}' in {actualDepartment}");
+                    _logger.LogInformation($"📧 Using cached email from fuzzy match: {actualEmail}");
+                }
+                else
+                {
+                    _logger.LogInformation($"📧 No name correction found, using original: {name}");
+                }
+                
+                _logger.LogInformation($"📧 Parsed: name={name} (actual={actualName}), message={message}, department={actualDepartment}, caller={callerFullName}");
 
                 if (!message!.Contains(callerFullName))
                 {
@@ -328,23 +369,28 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                     message = $"Message from {callerFullName}: {message}";
                 }
 
-                if (string.IsNullOrWhiteSpace(department))
+                // Use cached email if available, otherwise lookup
+                string? email = actualEmail;
+                if (string.IsNullOrWhiteSpace(email))
                 {
-                    _logger.LogWarning($"⚠️ send_message called without department for: {name}. This may cause lookup issues if there are multiple staff with the same name.");
+                    _logger.LogInformation($"📧 No cached email, performing lookup for: {actualName}");
+                    email = await _staffLookupService.GetStaffEmailAsync(actualName, actualDepartment);
                 }
-
-                var email = await _staffLookupService.GetStaffEmailAsync(name!, department);
 
                 if (!string.IsNullOrWhiteSpace(email))
                 {
-                    _logger.LogInformation($"✅ Sending email to: {name}, email: {email}, from caller: {callerFullName}");
+                    _logger.LogInformation($"✅ Sending email to: {actualName}, email: {email}, from caller: {callerFullName}");
                     
-                    var emailSuccess = await _emailService.SendMessageEmailAsync(name!, email, message!, callerId);
+                    var emailSuccess = await _emailService.SendMessageEmailAsync(actualName, email, message!, callerId);
                     
                     if (emailSuccess)
                     {
-                        var deptInfo = !string.IsNullOrWhiteSpace(department) ? $" in {department}" : "";
-                        _logger.LogInformation($"✅ Email sent successfully to {name}{deptInfo} from {callerFullName}");
+                        var deptInfo = !string.IsNullOrWhiteSpace(actualDepartment) ? $" in {actualDepartment}" : "";
+                        _logger.LogInformation($"✅ Email sent successfully to {actualName}{deptInfo} from {callerFullName}");
+                        
+                        // Clean up the correction after successful send
+                        _nameCorrections.Remove(correctionKey);
+                        
                         return new FunctionCallResult
                         {
                             Success = true,
@@ -353,7 +399,7 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                     }
                     else
                     {
-                        _logger.LogWarning($"❌ Failed to send email to {name} from {callerFullName}");
+                        _logger.LogWarning($"❌ Failed to send email to {actualName} from {callerFullName}");
                         return new FunctionCallResult
                         {
                             Success = false,
@@ -363,7 +409,7 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                 }
                 else
                 {
-                    _logger.LogWarning($"❌ No valid email found for: {name} (department: {department})");
+                    _logger.LogWarning($"❌ No valid email found for: {actualName} (original: {name}, department: {actualDepartment})");
                     return new FunctionCallResult
                     {
                         Success = false,
@@ -396,11 +442,33 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
             };
         }
 
+        // NEW: Helper method to create correction key
+        private string CreateCorrectionKey(string callerId, string name)
+        {
+            return $"{callerId}|{name.ToLowerInvariant()}";
+        }
+
         public void CleanupCallerInfo(string callerId)
         {
             if (_callerInfoCache.Remove(callerId))
             {
                 _logger.LogInformation($"🧹 Cleaned up caller info for: {callerId}");
+            }
+            
+            // NEW: Clean up all name corrections for this caller
+            var correctionsToRemove = _nameCorrections
+                .Where(kvp => kvp.Key.StartsWith(callerId + "|"))
+                .Select(kvp => kvp.Key)
+                .ToList();
+                
+            foreach (var key in correctionsToRemove)
+            {
+                _nameCorrections.Remove(key);
+            }
+            
+            if (correctionsToRemove.Any())
+            {
+                _logger.LogInformation($"🧹 Cleaned up {correctionsToRemove.Count} name correction(s) for: {callerId}");
             }
         }
 
@@ -408,6 +476,16 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
         {
             return _callerInfoCache.TryGetValue(callerId, out var info) ? info : null;
         }
+    }
+
+    // NEW: Class to store name corrections from fuzzy matching
+    public class NameCorrection
+    {
+        public string OriginalName { get; set; } = string.Empty;
+        public string CorrectedName { get; set; } = string.Empty;
+        public string? Department { get; set; }
+        public string? Email { get; set; }
+        public DateTime CorrectedAt { get; set; }
     }
 
     public class CallerInfo

@@ -154,11 +154,13 @@ app.MapPost("/api/incomingCall", async (
         logger.LogInformation($"✅ Call accepted - current active calls: {callSessionManager.GetActiveCallCount()}/2");
         logger.LogInformation($"appBaseUrl: {appBaseUrl}");
 
-        var callbackUri = new Uri(new Uri(appBaseUrl), $"/api/callbacks/{Guid.NewGuid()}?callerId={callerId}");
+        // URL-encode callerId to prevent '+' being decoded as space
+        var encodedCallerId = Uri.EscapeDataString(callerId);
+        var callbackUri = new Uri(new Uri(appBaseUrl), $"/api/callbacks/{Guid.NewGuid()}?callerId={encodedCallerId}");
         logger.LogInformation($"Callback Url: {callbackUri}");
 
-        // Include callerId in WebSocket URL
-        var websocketUri = appBaseUrl.Replace("https", "wss") + $"/ws?callerId={callerId}";
+        // Include callerId in WebSocket URL with proper URL encoding
+        var websocketUri = appBaseUrl.Replace("https", "wss") + $"/ws?callerId={encodedCallerId}";
         logger.LogInformation($"WebSocket Url: {websocketUri}");
 
         var mediaStreamingOptions = new MediaStreamingOptions(MediaStreamingAudioChannel.Mixed)

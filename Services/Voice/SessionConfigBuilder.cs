@@ -51,9 +51,9 @@ namespace CallAutomation.AzureAI.VoiceLive.Services.Voice
             _logger.LogWarning("═══════════════════════════════════════════════");
             _logger.LogWarning("🔊 AUDIO ENHANCEMENT CONFIGURATION VERIFICATION");
             _logger.LogWarning("═══════════════════════════════════════════════");
-            _logger.LogWarning("📍 NOISE PROFILE: RADIO/TV FILTERING (ULTRA-MAXIMUM)");
-            _logger.LogWarning("🔥 ULTRA AGGRESSIVE - DESIGNED TO IGNORE RADIO/TV VOICES");
-            _logger.LogWarning("⚠️  Caller must speak CLEARLY and DELIBERATELY");
+            _logger.LogWarning("📍 NOISE PROFILE: QUIET OFFICE (RESPONSIVE)");
+            _logger.LogWarning("✨ NORMAL SENSITIVITY - PICKS UP NATURAL SPEECH");
+            _logger.LogWarning("✅  Caller can speak naturally and conversationally");
             _logger.LogWarning("═══════════════════════════════════════════════");
 
             // Serialize to inspect the actual configuration
@@ -64,11 +64,11 @@ namespace CallAutomation.AzureAI.VoiceLive.Services.Voice
             _logger.LogWarning($"✅ Noise Reduction: azure_deep_noise_suppression (MAXIMUM)");
             _logger.LogWarning($"✅ Echo Cancellation: server_echo_cancellation");
             _logger.LogWarning($"✅ VAD Type: azure_semantic_vad");
-            _logger.LogWarning($"🔥 VAD Threshold: 0.8 (80% confidence - RADIO/TV FILTERING)");
+            _logger.LogWarning($"✅ VAD Threshold: 0.5 (50% confidence - QUIET OFFICE)");
             _logger.LogWarning($"✅ VAD Prefix Padding: 150ms");
-            _logger.LogWarning($"🔥 VAD Silence Duration: 800ms (0.8 second pause required)");
-            _logger.LogWarning($"🔥 VAD Min Speech: 500ms (half-second sustained speech)");
-            _logger.LogWarning($"🔥 VAD Max Silence: 1800ms (nearly 2 seconds patience)");
+            _logger.LogWarning($"✅ VAD Silence Duration: 400ms (0.4 second pause)");
+            _logger.LogWarning($"✅ VAD Min Speech: 250ms (quarter-second natural speech)");
+            _logger.LogWarning($"✅ VAD Max Silence: 1200ms (about 1 second patience)");
             _logger.LogWarning($"✅ VAD Remove Filler Words: true");
             _logger.LogWarning($"✅ Audio Format: pcm16 @ 24000Hz");
             _logger.LogWarning($"✅ Voice: en-US-EmmaNeural");
@@ -76,11 +76,11 @@ namespace CallAutomation.AzureAI.VoiceLive.Services.Voice
             _logger.LogWarning("═══════════════════════════════════════════════");
 
             // Original detailed logging (kept for backward compatibility)
-            _logger.LogInformation("Audio Enhancement Settings (RADIO/TV FILTERING - ULTRA-MAXIMUM):");
+            _logger.LogInformation("Audio Enhancement Settings (QUIET OFFICE - RESPONSIVE):");
             _logger.LogInformation("   Noise Reduction: azure_deep_noise_suppression (MAXIMUM)");
             _logger.LogInformation("   Echo Cancellation: server_echo_cancellation");
-            _logger.LogInformation("   Voice Activity Detection: azure_semantic_vad (threshold: 0.8)");
-            _logger.LogInformation("   Speech Detection: 500ms minimum, 800ms silence, 1800ms max pause");
+            _logger.LogInformation("   Voice Activity Detection: azure_semantic_vad (threshold: 0.5)");
+            _logger.LogInformation("   Speech Detection: 250ms minimum, 400ms silence, 1200ms max pause");
             _logger.LogInformation("   Audio Format: pcm16 @ 24kHz");
 
             return sessionConfig;
@@ -286,43 +286,39 @@ namespace CallAutomation.AzureAI.VoiceLive.Services.Voice
 
         /// <summary>
         /// Build turn detection configuration for voice activity detection
-        /// ULTRA-MAXIMUM FILTERING - FOR RADIO/TV BACKGROUND NOISE
+        /// QUIET OFFICE PROFILE - RESPONSIVE AND NATURAL
         /// </summary>
         private object BuildTurnDetection()
         {
-            // NOISE SUPPRESSION PROFILE: RADIO/TV IN BACKGROUND (ULTRA-MAXIMUM FILTERING)
-            // Specifically tuned to ignore radio voices while capturing caller speech
-            // Radio/TV voices are the hardest to filter because they're human speech!
+            // NOISE SUPPRESSION PROFILE: QUIET OFFICE (RESPONSIVE)
+            // Tuned for normal office environment with minimal background noise
+            // More responsive and natural than RADIO_TV profile
             return new
             {
                 type = "azure_semantic_vad",
 
-                // THRESHOLD: 0.8 = Require 80% confidence it's actual caller speech
-                // (was 0.75 - still confused by radio voices)
-                // This is ULTRA aggressive - designed to distinguish caller from radio
-                // 0.75 = Max filtering | 0.8 = Radio/TV filtering | 0.85 = Extreme (may miss caller)
-                threshold = 0.8,
+                // THRESHOLD: 0.5 = Normal responsiveness for quiet environments
+                // Lower = more sensitive, picks up normal speech easily
+                // 0.5 is balanced for quiet office with minimal false triggers
+                threshold = 0.5,
 
                 // PREFIX PADDING: Keep at 150ms to capture start of speech
                 prefix_padding_ms = 150,
 
-                // SILENCE DURATION: 800ms - VERY LONG pause required before processing
-                // (was 600ms - radio has quick back-and-forth that confused VAD)
-                // Bot waits 0.8 seconds of silence - radio rarely has this long pause
-                silence_duration_ms = 800,
+                // SILENCE DURATION: 400ms - Normal pause for processing
+                // Faster response time for quiet environment
+                silence_duration_ms = 400,
 
                 // Remove "um", "uh", etc. - keep enabled
                 remove_filler_words = true,
 
-                // MIN SPEECH DURATION: 500ms - Only accept sustained, deliberate speech
-                // (was 400ms - radio snippets were triggering bot)
-                // Requires full half-second of continuous speech from caller
-                min_speech_duration_ms = 500,
+                // MIN SPEECH DURATION: 250ms - Natural speech cadence
+                // Quarter-second is normal for words in conversation
+                min_speech_duration_ms = 250,
 
-                // MAX SILENCE: 1800ms - VERY patient with caller thinking
-                // (was 1500ms) - Allows nearly 2 seconds between caller sentences
-                // Gives caller plenty of time without radio interference
-                max_silence_for_turn_ms = 1800
+                // MAX SILENCE: 1200ms - Normal patience with caller thinking
+                // About 1 second between sentences - natural flow
+                max_silence_for_turn_ms = 1200
             };
         }
 

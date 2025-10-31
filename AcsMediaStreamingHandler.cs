@@ -1,4 +1,5 @@
 using System.Net.WebSockets;
+using System.Collections.Concurrent;
 using Azure.Communication.CallAutomation;
 using System.Text;
 using CallAutomation.AzureAI.VoiceLive;
@@ -6,44 +7,44 @@ using CallAutomation.AzureAI.VoiceLive.Services.Interfaces;
 
 public class AcsMediaStreamingHandler
 {
-    private WebSocket m_webSocket;
-    private CancellationTokenSource m_cts;
-    private MemoryStream m_buffer;
-    private AzureVoiceLiveService m_aiServiceHandler;
-    private IConfiguration m_configuration;
-    private ILogger<AzureVoiceLiveService> m_logger;
-    private string m_callerId;
-    private CallAutomationClient m_callAutomationClient;
-    private Dictionary<string, string> m_activeCallConnections;
+    private WebSocket _webSocket;
+    private CancellationTokenSource _cts;
+    private MemoryStream _buffer;
+    private AzureVoiceLiveService _aiServiceHandler;
+    private IConfiguration _configuration;
+    private ILogger<AzureVoiceLiveService> _logger;
+    private string _callerId;
+    private CallAutomationClient _callAutomationClient;
+    private ConcurrentDictionary<string, string> _activeCallConnections;
     private readonly IServiceProvider _serviceProvider;
 
     public AcsMediaStreamingHandler(
-        WebSocket webSocket, 
-        IConfiguration configuration, 
-        ILogger<AzureVoiceLiveService> logger, 
-        string callerId, 
-        CallAutomationClient callAutomationClient, 
-        Dictionary<string, string> activeCallConnections,
+        WebSocket webSocket,
+        IConfiguration configuration,
+        ILogger<AzureVoiceLiveService> logger,
+        string callerId,
+        CallAutomationClient callAutomationClient,
+        ConcurrentDictionary<string, string> activeCallConnections,
         IServiceProvider serviceProvider)
     {
-        m_webSocket = webSocket;
-        m_configuration = configuration;
-        m_buffer = new MemoryStream();
-        m_cts = new CancellationTokenSource();
-        m_logger = logger;
-        m_callerId = callerId;
-        m_callAutomationClient = callAutomationClient;
-        m_activeCallConnections = activeCallConnections;
+        _webSocket = webSocket;
+        _configuration = configuration;
+        _buffer = new MemoryStream();
+        _cts = new CancellationTokenSource();
+        _logger = logger;
+        _callerId = callerId;
+        _callAutomationClient = callAutomationClient;
+        _activeCallConnections = activeCallConnections;
         _serviceProvider = serviceProvider;
         
-        m_logger.LogInformation($"🔗 WebSocket connection established with Caller ID: {m_callerId}");
+        _logger.LogInformation($"🔗 WebSocket connection established with Caller ID: {_callerId}");
     }
 
     public IServiceProvider GetServiceProvider() => _serviceProvider;
 
     public async Task ProcessWebSocketAsync()
     {
-        if (m_webSocket == null)
+        if (_webSocket == null)
         {
             return;
         }
@@ -52,19 +53,19 @@ public class AcsMediaStreamingHandler
         
         // FIXED: Check if THIS SPECIFIC call has expired, not if we can accept NEW calls
         // The session was already started in Program.cs, so we just verify it's still valid
-        if (sessionManager.IsCallExpired(m_callerId))
+        if (sessionManager.IsCallExpired(_callerId))
         {
-            m_logger.LogWarning($"⏰ WebSocket connection attempted for expired session: {m_callerId}");
+            _logger.LogWarning($"⏰ WebSocket connection attempted for expired session: {_callerId}");
             await CloseNormalWebSocketAsync();
             return;
         }
 
         // Log session information
-        var remainingTime = sessionManager.GetRemainingTime(m_callerId);
+        var remainingTime = sessionManager.GetRemainingTime(_callerId);
         var activeCallCount = sessionManager.GetActiveCallCount();
-        m_logger.LogInformation($"⏰ WebSocket connected with {remainingTime.TotalSeconds:F0}s remaining for: {m_callerId}");
-        m_logger.LogInformation($"📊 Active calls: {activeCallCount}/2");
-        m_logger.LogWarning($"🚨 BILL SHOCK PREVENTION: Call will be force terminated if it exceeds 90s total duration");
+        _logger.LogInformation($"⏰ WebSocket connected with {remainingTime.TotalSeconds:F0}s remaining for: {_callerId}");
+        _logger.LogInformation($"📊 Active calls: {activeCallCount}/2");
+        _logger.LogWarning($"🚨 BILL SHOCK PREVENTION: Call will be force terminated if it exceeds 90s total duration");
 
         // Get all services upfront
         var staffLookupService = _serviceProvider.GetRequiredService<IStaffLookupService>();
@@ -75,25 +76,25 @@ public class AcsMediaStreamingHandler
         var voiceSessionManager = _serviceProvider.GetRequiredService<IVoiceSessionManager>();
         var loggerFactory = _serviceProvider.GetRequiredService<ILoggerFactory>();
         
-        m_logger.LogInformation("🔧 All services resolved from DI container");
+        _logger.LogInformation("🔧 All services resolved from DI container");
         
         // Start email initialization asynchronously
         var emailInitTask = emailService.InitializeAsync();
-        m_logger.LogInformation("📧 Email service initialization started asynchronously");
+        _logger.LogInformation("📧 Email service initialization started asynchronously");
 
         // Initialize call management
-        callManagementService.Initialize(m_callAutomationClient, m_activeCallConnections);
-        m_logger.LogInformation("📞 Call management service initialized");
+        callManagementService.Initialize(_callAutomationClient, _activeCallConnections);
+        _logger.LogInformation("📞 Call management service initialized");
 
         // Create AI service handler
-        m_logger.LogInformation("🤖 Creating AzureVoiceLiveService...");
-        m_aiServiceHandler = new AzureVoiceLiveService(
+        _logger.LogInformation("🤖 Creating AzureVoiceLiveService...");
+        _aiServiceHandler = new AzureVoiceLiveService(
             this, 
-            m_configuration, 
-            m_logger, 
-            m_callerId, 
-            m_callAutomationClient, 
-            m_activeCallConnections,
+            _configuration, 
+            _logger, 
+            _callerId, 
+            _callAutomationClient, 
+            _activeCallConnections,
             staffLookupService,
             emailService,
             callManagementService,
@@ -105,18 +106,18 @@ public class AcsMediaStreamingHandler
         try
         {
             var webSocketTask = StartReceivingFromAcsMediaWebSocket();
-            m_logger.LogInformation("🎧 WebSocket audio processing started");
+            _logger.LogInformation("🎧 WebSocket audio processing started");
             
             _ = Task.Run(async () =>
             {
                 try
                 {
                     await emailInitTask;
-                    m_logger.LogInformation("✅ Email service initialized successfully");
+                    _logger.LogInformation("✅ Email service initialized successfully");
                 }
                 catch (Exception ex)
                 {
-                    m_logger.LogError(ex, "❌ Failed to initialize email service");
+                    _logger.LogError(ex, "❌ Failed to initialize email service");
                 }
             });
             
@@ -124,66 +125,66 @@ public class AcsMediaStreamingHandler
         }
         catch (Exception ex)
         {
-            m_logger.LogError(ex, "❌ Exception in ProcessWebSocketAsync");
+            _logger.LogError(ex, "❌ Exception in ProcessWebSocketAsync");
             Console.WriteLine($"Exception -> {ex}");
         }
         finally
         {
-            m_logger.LogInformation("🛑 Cleaning up AcsMediaStreamingHandler...");
+            _logger.LogInformation("🛑 Cleaning up AcsMediaStreamingHandler...");
             
             try
             {
                 var callSessionManager = _serviceProvider.GetRequiredService<ICallSessionManager>();
-                callSessionManager.EndCallSession(m_callerId);
-                m_logger.LogInformation($"✅ Call session ended for: {m_callerId}");
+                callSessionManager.EndCallSession(_callerId);
+                _logger.LogInformation($"✅ Call session ended for: {_callerId}");
             }
             catch (Exception ex)
             {
-                m_logger.LogError(ex, $"❌ Error ending call session for: {m_callerId}");
+                _logger.LogError(ex, $"❌ Error ending call session for: {_callerId}");
             }
             
-            if (m_aiServiceHandler != null)
+            if (_aiServiceHandler != null)
             {
-                await m_aiServiceHandler.Close();
+                await _aiServiceHandler.Close();
             }
             this.Close();
-            m_logger.LogInformation("✅ AcsMediaStreamingHandler cleanup completed");
+            _logger.LogInformation("✅ AcsMediaStreamingHandler cleanup completed");
         }
     }
 
     public async Task SendMessageAsync(string message)
     {
-        if (m_webSocket?.State == WebSocketState.Open)
+        if (_webSocket?.State == WebSocketState.Open)
         {
             try
             {
                 var callSessionManager = _serviceProvider.GetRequiredService<ICallSessionManager>();
-                if (callSessionManager.IsCallExpired(m_callerId))
+                if (callSessionManager.IsCallExpired(_callerId))
                 {
-                    m_logger.LogWarning($"⏰ Refusing to send message - session expired for: {m_callerId}");
+                    _logger.LogWarning($"⏰ Refusing to send message - session expired for: {_callerId}");
                     return;
                 }
 
                 byte[] jsonBytes = Encoding.UTF8.GetBytes(message);
-                await m_webSocket.SendAsync(new ArraySegment<byte>(jsonBytes), WebSocketMessageType.Text, endOfMessage: true, CancellationToken.None);
+                await _webSocket.SendAsync(new ArraySegment<byte>(jsonBytes), WebSocketMessageType.Text, endOfMessage: true, CancellationToken.None);
                 
                 if (message.Contains("AudioData"))
                 {
-                    m_logger.LogDebug($"📊 Audio data sent: {jsonBytes.Length} bytes");
+                    _logger.LogDebug($"📊 Audio data sent: {jsonBytes.Length} bytes");
                 }
                 else
                 {
-                    m_logger.LogDebug($"📤 Message sent to ACS: {message.Length} chars");
+                    _logger.LogDebug($"📤 Message sent to ACS: {message.Length} chars");
                 }
             }
             catch (Exception ex)
             {
-                m_logger.LogError(ex, "❌ Failed to send message to ACS WebSocket");
+                _logger.LogError(ex, "❌ Failed to send message to ACS WebSocket");
             }
         }
         else
         {
-            m_logger.LogWarning($"⚠️ Cannot send message - WebSocket state: {m_webSocket?.State}");
+            _logger.LogWarning($"⚠️ Cannot send message - WebSocket state: {_webSocket?.State}");
         }
     }
 
@@ -191,16 +192,16 @@ public class AcsMediaStreamingHandler
     {
         try
         {
-            if (m_webSocket?.State == WebSocketState.Open)
+            if (_webSocket?.State == WebSocketState.Open)
             {
-                await m_webSocket.CloseAsync(result.CloseStatus ?? WebSocketCloseStatus.NormalClosure, 
+                await _webSocket.CloseAsync(result.CloseStatus ?? WebSocketCloseStatus.NormalClosure, 
                     result.CloseStatusDescription, CancellationToken.None);
-                m_logger.LogInformation("🛑 WebSocket closed with received close status");
+                _logger.LogInformation("🛑 WebSocket closed with received close status");
             }
         }
         catch (Exception ex)
         {
-            m_logger.LogError(ex, "❌ Error closing WebSocket with received status");
+            _logger.LogError(ex, "❌ Error closing WebSocket with received status");
         }
     }
 
@@ -208,15 +209,15 @@ public class AcsMediaStreamingHandler
     {
         try
         {
-            if (m_webSocket?.State == WebSocketState.Open)
+            if (_webSocket?.State == WebSocketState.Open)
             {
-                await m_webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Stream completed", CancellationToken.None);
-                m_logger.LogInformation("🛑 WebSocket closed normally");
+                await _webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Stream completed", CancellationToken.None);
+                _logger.LogInformation("🛑 WebSocket closed normally");
             }
         }
         catch (Exception ex)
         {
-            m_logger.LogError(ex, "❌ Error closing WebSocket normally");
+            _logger.LogError(ex, "❌ Error closing WebSocket normally");
         }
     }
 
@@ -224,17 +225,17 @@ public class AcsMediaStreamingHandler
     {
         try
         {
-            m_logger.LogInformation("🛑 Closing AcsMediaStreamingHandler resources...");
+            _logger.LogInformation("🛑 Closing AcsMediaStreamingHandler resources...");
             
-            m_cts.Cancel();
-            m_cts.Dispose();
-            m_buffer.Dispose();
+            _cts.Cancel();
+            _cts.Dispose();
+            _buffer.Dispose();
             
-            m_logger.LogInformation("✅ AcsMediaStreamingHandler resources closed");
+            _logger.LogInformation("✅ AcsMediaStreamingHandler resources closed");
         }
         catch (Exception ex)
         {
-            m_logger.LogError(ex, "❌ Error closing AcsMediaStreamingHandler resources");
+            _logger.LogError(ex, "❌ Error closing AcsMediaStreamingHandler resources");
         }
     }
 
@@ -243,9 +244,9 @@ public class AcsMediaStreamingHandler
         try
         {
             var callSessionManager = _serviceProvider.GetRequiredService<ICallSessionManager>();
-            if (callSessionManager.IsCallExpired(m_callerId))
+            if (callSessionManager.IsCallExpired(_callerId))
             {
-                m_logger.LogWarning($"⏰ Dropping audio data - session expired for: {m_callerId}");
+                _logger.LogWarning($"⏰ Dropping audio data - session expired for: {_callerId}");
                 return;
             }
 
@@ -254,58 +255,58 @@ public class AcsMediaStreamingHandler
             {
                 if (!audioData.IsSilent)
                 {
-                    if (m_aiServiceHandler != null)
+                    if (_aiServiceHandler != null)
                     {
-                        await m_aiServiceHandler.SendAudioToExternalAI(audioData.Data.ToArray());
+                        await _aiServiceHandler.SendAudioToExternalAI(audioData.Data.ToArray());
                     }
                     
                     if (audioData.Data.Length > 0 && audioData.Data.Length % 100 == 0)
                     {
-                        m_logger.LogDebug($"🎤 Audio data sent to AI: {audioData.Data.Length} bytes");
+                        _logger.LogDebug($"🎤 Audio data sent to AI: {audioData.Data.Length} bytes");
                     }
                 }
             }
         }
         catch (Exception ex)
         {
-            m_logger.LogError(ex, "❌ Error processing audio data for AI service");
+            _logger.LogError(ex, "❌ Error processing audio data for AI service");
         }
     }
 
     private async Task StartReceivingFromAcsMediaWebSocket()
     {
-        if (m_webSocket == null)
+        if (_webSocket == null)
         {
-            m_logger.LogWarning("⚠️ WebSocket is null, cannot start receiving");
+            _logger.LogWarning("⚠️ WebSocket is null, cannot start receiving");
             return;
         }
 
         try
         {
-            m_logger.LogInformation("🎧 Starting to receive audio data from ACS WebSocket...");
+            _logger.LogInformation("🎧 Starting to receive audio data from ACS WebSocket...");
             
             const int bufferSize = 4096;
             byte[] receiveBuffer = new byte[bufferSize];
             
             var callSessionManager = _serviceProvider.GetRequiredService<ICallSessionManager>();
             
-            while (m_webSocket.State == WebSocketState.Open && !m_cts.Token.IsCancellationRequested)
+            while (_webSocket.State == WebSocketState.Open && !_cts.Token.IsCancellationRequested)
             {
                 try
                 {
-                    if (callSessionManager.IsCallExpired(m_callerId))
+                    if (callSessionManager.IsCallExpired(_callerId))
                     {
-                        m_logger.LogWarning($"⏰ Session expired - stopping WebSocket processing for: {m_callerId}");
+                        _logger.LogWarning($"⏰ Session expired - stopping WebSocket processing for: {_callerId}");
                         break;
                     }
 
-                    WebSocketReceiveResult receiveResult = await m_webSocket.ReceiveAsync(
+                    WebSocketReceiveResult receiveResult = await _webSocket.ReceiveAsync(
                         new ArraySegment<byte>(receiveBuffer), 
-                        m_cts.Token);
+                        _cts.Token);
 
                     if (receiveResult.MessageType == WebSocketMessageType.Close)
                     {
-                        m_logger.LogInformation("🛑 WebSocket close message received");
+                        _logger.LogInformation("🛑 WebSocket close message received");
                         break;
                     }
                     
@@ -321,47 +322,47 @@ public class AcsMediaStreamingHandler
                             }
                             catch (Exception ex)
                             {
-                                m_logger.LogError(ex, "❌ Error processing audio data asynchronously");
+                                _logger.LogError(ex, "❌ Error processing audio data asynchronously");
                             }
                         });
                     }
                     else if (receiveResult.MessageType == WebSocketMessageType.Binary)
                     {
-                        m_logger.LogDebug("📦 Binary data received (not processed)");
+                        _logger.LogDebug("📦 Binary data received (not processed)");
                     }
                 }
                 catch (OperationCanceledException)
                 {
-                    m_logger.LogInformation("🛑 WebSocket receiving cancelled");
+                    _logger.LogInformation("🛑 WebSocket receiving cancelled");
                     break;
                 }
                 catch (WebSocketException wsEx) when (wsEx.WebSocketErrorCode == WebSocketError.ConnectionClosedPrematurely)
                 {
-                    m_logger.LogWarning("⚠️ WebSocket connection closed prematurely");
+                    _logger.LogWarning("⚠️ WebSocket connection closed prematurely");
                     break;
                 }
                 catch (Exception ex)
                 {
-                    m_logger.LogError(ex, "❌ Error receiving data from WebSocket");
+                    _logger.LogError(ex, "❌ Error receiving data from WebSocket");
                     
-                    if (m_webSocket.State != WebSocketState.Open)
+                    if (_webSocket.State != WebSocketState.Open)
                     {
                         break;
                     }
                     
-                    await Task.Delay(100, m_cts.Token);
+                    await Task.Delay(100, _cts.Token);
                 }
             }
             
-            m_logger.LogInformation($"🛑 Stopped receiving from ACS WebSocket. Final state: {m_webSocket.State}");
+            _logger.LogInformation($"🛑 Stopped receiving from ACS WebSocket. Final state: {_webSocket.State}");
         }
         catch (OperationCanceledException)
         {
-            m_logger.LogInformation("🛑 StartReceivingFromAcsMediaWebSocket cancelled");
+            _logger.LogInformation("🛑 StartReceivingFromAcsMediaWebSocket cancelled");
         }
         catch (Exception ex)
         {
-            m_logger.LogError(ex, "❌ Fatal error in StartReceivingFromAcsMediaWebSocket");
+            _logger.LogError(ex, "❌ Fatal error in StartReceivingFromAcsMediaWebSocket");
         }
     }
 }

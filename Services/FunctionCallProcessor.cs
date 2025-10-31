@@ -76,13 +76,13 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                 };
 
                 var jsonResponse = JsonSerializer.Serialize(functionResponse, new JsonSerializerOptions { WriteIndented = true });
-                _logger.LogInformation($"[DEBUG] Sending function response to AI: {jsonResponse}");
+                _logger.LogDebug("Sending function response to AI: {JsonResponse}", jsonResponse);
                 await sendMessageCallback(jsonResponse, CancellationToken.None);
 
                 // Trigger AI response
                 var createResponse = new { type = "response.create" };
                 var jsonCreateResponse = JsonSerializer.Serialize(createResponse, new JsonSerializerOptions { WriteIndented = true });
-                _logger.LogInformation($"[DEBUG] Triggering AI response: {jsonCreateResponse}");
+                _logger.LogDebug("Triggering AI response: {JsonCreateResponse}", jsonCreateResponse);
                 await sendMessageCallback(jsonCreateResponse, CancellationToken.None);
 
                 return true;

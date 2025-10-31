@@ -7,6 +7,7 @@ using Microsoft.AspNetCore.Mvc;
 using Newtonsoft.Json;
 using System.ComponentModel.DataAnnotations;
 using System.Net.WebSockets;
+using System.Collections.Concurrent;
 using CallAutomation.AzureAI.VoiceLive;
 using CallAutomation.AzureAI.VoiceLive.Services.Interfaces;
 using CallAutomation.AzureAI.VoiceLive.Services;
@@ -34,8 +35,8 @@ ArgumentNullException.ThrowIfNullOrEmpty(acsConnectionString);
 //Call Automation Client
 var client = new CallAutomationClient(acsConnectionString);
 
-// FIXED: Dictionary to track callerId -> callConnectionId mapping (not contextId -> callConnectionId)
-var activeCallConnections = new Dictionary<string, string>(); // callerId -> callConnectionId
+// THREAD SAFETY FIX: Use ConcurrentDictionary for thread-safe access from multiple WebSocket connections
+var activeCallConnections = new ConcurrentDictionary<string, string>(); // callerId -> callConnectionId
 
 // Register existing services for dependency injection
 builder.Services.AddScoped<IStaffLookupService, StaffLookupService>();
@@ -221,8 +222,8 @@ app.MapPost("/api/callbacks/{contextId}", async (
         }
         else if (@event is CallDisconnected callDisconnectedEvent)
         {
-            // FIXED: Remove by callerId (not contextId)
-            bool removed = activeCallConnections.Remove(callerId);
+            // FIXED: Remove by callerId (not contextId) - use TryRemove for ConcurrentDictionary
+            bool removed = activeCallConnections.TryRemove(callerId, out _);
             if (removed)
             {
                 logger.LogInformation($"Call disconnected - removed CallConnectionId for caller: {callerId}");

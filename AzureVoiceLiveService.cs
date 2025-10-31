@@ -1,4 +1,5 @@
 using Azure.Communication.CallAutomation;
+using System.Collections.Concurrent;
 using CallAutomation.AzureAI.VoiceLive.Models;
 using CallAutomation.AzureAI.VoiceLive.Services.Interfaces;
 using CallAutomation.AzureAI.VoiceLive.Services.Voice;
@@ -31,12 +32,12 @@ namespace CallAutomation.AzureAI.VoiceLive
         private const int MAX_PENDING_AUDIO_PACKETS = 100; // Limit buffered audio to prevent memory issues
 
         public AzureVoiceLiveService(
-            AcsMediaStreamingHandler mediaStreaming, 
-            IConfiguration configuration, 
-            ILogger<AzureVoiceLiveService> logger, 
-            string callerId, 
-            CallAutomationClient callAutomationClient, 
-            Dictionary<string, string> activeCallConnections,
+            AcsMediaStreamingHandler mediaStreaming,
+            IConfiguration configuration,
+            ILogger<AzureVoiceLiveService> logger,
+            string callerId,
+            CallAutomationClient callAutomationClient,
+            ConcurrentDictionary<string, string> activeCallConnections,
             IStaffLookupService staffLookupService,
             IEmailService emailService,
             ICallManagementService callManagementService,

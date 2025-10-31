@@ -177,14 +177,22 @@ app.MapPost("/api/incomingCall", async (
 
         try
         {
+            // CRITICAL FIX: Start session tracking BEFORE AnswerCallAsync to prevent race condition
+            // AnswerCallAsync immediately triggers WebSocket connection, which checks session timeout
+            // Must initialize session first so WebSocket handler sees valid timeout
+            var tempConnectionId = $"pending-{Guid.NewGuid()}"; // Temporary ID until we get real one
+            callSessionManager.StartCallSession(callerId, tempConnectionId);
+            logger.LogInformation($"⏰ Pre-initialized call session with 90s timeout for: {callerId}");
+
             AnswerCallResult answerCallResult = await client.AnswerCallAsync(options);
             logger.LogInformation($"✅ Answered call for connection id: {answerCallResult.CallConnection.CallConnectionId}");
 
-            // Track this call session with 90-second timeout and ACTIVE bill shock prevention
+            // Update session with actual CallConnectionId (replace temp ID)
+            callSessionManager.EndCallSession(callerId); // Remove temp session
             callSessionManager.StartCallSession(callerId, answerCallResult.CallConnection.CallConnectionId);
 
             var remainingTime = callSessionManager.GetRemainingTime(callerId);
-            logger.LogInformation($"⏰ Call session started with {remainingTime.TotalSeconds:F0}s timeout for: {callerId}");
+            logger.LogInformation($"⏰ Call session confirmed with {remainingTime.TotalSeconds:F0}s timeout for: {callerId}");
             logger.LogWarning($"🚨 BILL SHOCK PREVENTION: Call will be FORCE TERMINATED at 90s limit for: {callerId}");
         }
         catch (Exception ex)

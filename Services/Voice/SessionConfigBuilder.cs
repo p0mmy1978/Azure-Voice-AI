@@ -51,7 +51,8 @@ namespace CallAutomation.AzureAI.VoiceLive.Services.Voice
             _logger.LogWarning("═══════════════════════════════════════════════");
             _logger.LogWarning("🔊 AUDIO ENHANCEMENT CONFIGURATION VERIFICATION");
             _logger.LogWarning("═══════════════════════════════════════════════");
-            _logger.LogWarning("📍 NOISE PROFILE: OPEN OFFICE (AGGRESSIVE FILTERING)");
+            _logger.LogWarning("📍 NOISE PROFILE: VERY NOISY OFFICE (MAXIMUM FILTERING)");
+            _logger.LogWarning("⚠️  EXTREMELY AGGRESSIVE - WILL IGNORE MOST BACKGROUND NOISE");
             _logger.LogWarning("═══════════════════════════════════════════════");
 
             // Serialize to inspect the actual configuration
@@ -62,11 +63,11 @@ namespace CallAutomation.AzureAI.VoiceLive.Services.Voice
             _logger.LogWarning($"✅ Noise Reduction: azure_deep_noise_suppression (MAXIMUM)");
             _logger.LogWarning($"✅ Echo Cancellation: server_echo_cancellation");
             _logger.LogWarning($"✅ VAD Type: azure_semantic_vad");
-            _logger.LogWarning($"✅ VAD Threshold: 0.6 (60% confidence - filters background)");
+            _logger.LogWarning($"🔥 VAD Threshold: 0.75 (75% confidence - MAXIMUM FILTERING)");
             _logger.LogWarning($"✅ VAD Prefix Padding: 150ms");
-            _logger.LogWarning($"✅ VAD Silence Duration: 400ms (ignores brief pauses)");
-            _logger.LogWarning($"✅ VAD Min Speech: 250ms (ignores quick sounds)");
-            _logger.LogWarning($"✅ VAD Max Silence: 1200ms (patient with caller)");
+            _logger.LogWarning($"🔥 VAD Silence Duration: 600ms (long pause required)");
+            _logger.LogWarning($"🔥 VAD Min Speech: 400ms (half-second minimum)");
+            _logger.LogWarning($"🔥 VAD Max Silence: 1500ms (very patient)");
             _logger.LogWarning($"✅ VAD Remove Filler Words: true");
             _logger.LogWarning($"✅ Audio Format: pcm16 @ 24000Hz");
             _logger.LogWarning($"✅ Voice: en-US-EmmaNeural");
@@ -74,11 +75,11 @@ namespace CallAutomation.AzureAI.VoiceLive.Services.Voice
             _logger.LogWarning("═══════════════════════════════════════════════");
 
             // Original detailed logging (kept for backward compatibility)
-            _logger.LogInformation("Audio Enhancement Settings (OPEN OFFICE PROFILE):");
+            _logger.LogInformation("Audio Enhancement Settings (VERY NOISY OFFICE - MAXIMUM FILTERING):");
             _logger.LogInformation("   Noise Reduction: azure_deep_noise_suppression (MAXIMUM)");
             _logger.LogInformation("   Echo Cancellation: server_echo_cancellation");
-            _logger.LogInformation("   Voice Activity Detection: azure_semantic_vad (threshold: 0.6)");
-            _logger.LogInformation("   Speech Detection: 250ms minimum, 400ms silence, 1200ms max pause");
+            _logger.LogInformation("   Voice Activity Detection: azure_semantic_vad (threshold: 0.75)");
+            _logger.LogInformation("   Speech Detection: 400ms minimum, 600ms silence, 1500ms max pause");
             _logger.LogInformation("   Audio Format: pcm16 @ 24kHz");
 
             return sessionConfig;
@@ -284,40 +285,42 @@ namespace CallAutomation.AzureAI.VoiceLive.Services.Voice
 
         /// <summary>
         /// Build turn detection configuration for voice activity detection
-        /// TUNED FOR OPEN OFFICE / NOISY ENVIRONMENTS
+        /// TUNED FOR VERY NOISY OPEN OFFICE - MAXIMUM FILTERING
         /// </summary>
         private object BuildTurnDetection()
         {
-            // NOISE SUPPRESSION PROFILE: OPEN OFFICE (AGGRESSIVE FILTERING)
-            // These settings reduce false triggers from background conversations
+            // NOISE SUPPRESSION PROFILE: VERY NOISY OPEN OFFICE (MAXIMUM FILTERING)
+            // These settings AGGRESSIVELY filter background conversations
             return new
             {
                 type = "azure_semantic_vad",
 
-                // THRESHOLD: 0.6 = Require 60% confidence it's actual caller speech
-                // (was 0.4 - too sensitive, picked up background noise)
-                // 0.5 = Balanced | 0.6 = Noisy office | 0.7 = Very noisy
-                threshold = 0.6,
+                // THRESHOLD: 0.75 = Require 75% confidence it's actual caller speech
+                // (was 0.6 - still too sensitive for very noisy environments)
+                // This is VERY aggressive - only clear, deliberate speech gets through
+                // 0.6 = Noisy office | 0.7 = Very noisy | 0.75 = MAXIMUM filtering
+                threshold = 0.75,
 
                 // PREFIX PADDING: Keep at 150ms to capture start of speech
                 prefix_padding_ms = 150,
 
-                // SILENCE DURATION: 400ms - Longer pause before processing
-                // (was 150ms - too short, triggered on brief background pauses)
-                // Prevents bot from reacting to quick background chatter
-                silence_duration_ms = 400,
+                // SILENCE DURATION: 600ms - LONG pause required before processing
+                // (was 400ms - still triggered on background voices)
+                // Bot waits 0.6 seconds of silence before deciding turn is over
+                silence_duration_ms = 600,
 
                 // Remove "um", "uh", etc. - keep enabled
                 remove_filler_words = true,
 
-                // MIN SPEECH DURATION: 250ms - Ignore quick background sounds
-                // (was 100ms - picked up brief noises like coughs, laughs)
-                // Requires deliberate speech from caller
-                min_speech_duration_ms = 250,
+                // MIN SPEECH DURATION: 400ms - Only accept sustained speech
+                // (was 250ms - still picked up background noises)
+                // Requires nearly half a second of continuous speech
+                min_speech_duration_ms = 400,
 
-                // MAX SILENCE: 1200ms - Be patient with caller thinking
-                // (was 800ms) - Gives caller more time between sentences
-                max_silence_for_turn_ms = 1200
+                // MAX SILENCE: 1500ms - Very patient with caller thinking
+                // (was 1200ms) - Allows longer pauses mid-sentence
+                // Gives caller 1.5 seconds to collect thoughts
+                max_silence_for_turn_ms = 1500
             };
         }
 

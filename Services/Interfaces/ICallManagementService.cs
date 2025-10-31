@@ -1,3 +1,5 @@
+using System.Collections.Concurrent;
+
 namespace CallAutomation.AzureAI.VoiceLive.Services.Interfaces
 {
     public interface ICallManagementService
@@ -6,8 +8,8 @@ namespace CallAutomation.AzureAI.VoiceLive.Services.Interfaces
         /// Initialize the call management service with call automation client and connection tracking
         /// </summary>
         /// <param name="callAutomationClient">Azure Call Automation client</param>
-        /// <param name="activeCallConnections">Dictionary tracking active connections</param>
-        void Initialize(Azure.Communication.CallAutomation.CallAutomationClient callAutomationClient, Dictionary<string, string> activeCallConnections);
+        /// <param name="activeCallConnections">Thread-safe dictionary tracking active connections</param>
+        void Initialize(Azure.Communication.CallAutomation.CallAutomationClient callAutomationClient, ConcurrentDictionary<string, string> activeCallConnections);
 
         /// <summary>
         /// Hang up the ACS call for the current caller

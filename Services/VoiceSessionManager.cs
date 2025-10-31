@@ -31,11 +31,13 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                     return true;
                 }
 
-                // Azure Voice Live API endpoint format
-                var websocketUrl = new Uri($"{endpoint.Replace("https", "wss")}/voice-agent/realtime?api-version=2025-05-01-preview&x-ms-client-request-id={Guid.NewGuid()}&model={model}&api-key={apiKey}");
+                // Azure Voice Live API endpoint format - API key in header for security
+                var websocketUrl = new Uri($"{endpoint.Replace("https", "wss")}/voice-agent/realtime?api-version=2025-05-01-preview&x-ms-client-request-id={Guid.NewGuid()}&model={model}");
 
                 _webSocket = new ClientWebSocket();
-                
+
+                // SECURITY FIX: Use header instead of URL query parameter for API key
+                _webSocket.Options.SetRequestHeader("api-key", apiKey);
                 _webSocket.Options.SetRequestHeader("User-Agent", "AzureVoiceAI/1.0");
                 _webSocket.Options.KeepAliveInterval = TimeSpan.FromSeconds(15);
                 _webSocket.Options.SetBuffer(16384, 16384);

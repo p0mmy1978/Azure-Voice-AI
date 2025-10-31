@@ -1,4 +1,5 @@
 using Azure.Communication.CallAutomation;
+using System.Collections.Concurrent;
 using CallAutomation.AzureAI.VoiceLive.Services.Interfaces;
 
 namespace CallAutomation.AzureAI.VoiceLive.Services
@@ -7,7 +8,7 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
     {
         private readonly ILogger<CallManagementService> _logger;
         private CallAutomationClient _callAutomationClient = default!;
-        private Dictionary<string, string> _activeCallConnections = default!;
+        private ConcurrentDictionary<string, string> _activeCallConnections = default!;
         private readonly HashSet<string> _hungUpCalls = new();
 
         public CallManagementService(ILogger<CallManagementService> logger)
@@ -15,11 +16,11 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
             _logger = logger;
         }
 
-        public void Initialize(CallAutomationClient callAutomationClient, Dictionary<string, string> activeCallConnections)
+        public void Initialize(CallAutomationClient callAutomationClient, ConcurrentDictionary<string, string> activeCallConnections)
         {
             _callAutomationClient = callAutomationClient ?? throw new ArgumentNullException(nameof(callAutomationClient));
             _activeCallConnections = activeCallConnections ?? throw new ArgumentNullException(nameof(activeCallConnections));
-            
+
             _logger.LogInformation("📞 CallManagementService initialized successfully");
         }
 

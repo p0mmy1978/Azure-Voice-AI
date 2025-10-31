@@ -230,8 +230,11 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                 do
                 {
                     using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                    timeoutCts.CancelAfter(TimeSpan.FromSeconds(30));
-                    
+                    // CRITICAL: Increased from 30s to 120s to prevent premature disconnection
+                    // 30s was too aggressive - killed connections during normal conversation pauses
+                    // 120s allows for: user thinking, AI processing, long responses, natural pauses
+                    timeoutCts.CancelAfter(TimeSpan.FromSeconds(120));
+
                     result = await _webSocket!.ReceiveAsync(receiveBuffer, timeoutCts.Token);
                     
                     if (result.MessageType == WebSocketMessageType.Text)

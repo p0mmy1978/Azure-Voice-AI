@@ -48,10 +48,10 @@ namespace CallAutomation.AzureAI.VoiceLive.Services
                     
                     var callConnection = _callAutomationClient.GetCallConnection(callConnectionId);
                     await callConnection.HangUpAsync(forEveryone: true);
-                    
+
                     _hungUpCalls.Add(callerId);
-                    
-                    bool removed = _activeCallConnections.Remove(callerId);
+
+                    bool removed = _activeCallConnections.TryRemove(callerId, out _);
                     if (removed)
                     {
                         _logger.LogDebug($"🧹 Removed CallConnectionId from active connections for caller: {callerId}");

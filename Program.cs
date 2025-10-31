@@ -222,8 +222,8 @@ app.MapPost("/api/callbacks/{contextId}", async (
         }
         else if (@event is CallDisconnected callDisconnectedEvent)
         {
-            // FIXED: Remove by callerId (not contextId)
-            bool removed = activeCallConnections.Remove(callerId);
+            // FIXED: Remove by callerId (not contextId) - use TryRemove for ConcurrentDictionary
+            bool removed = activeCallConnections.TryRemove(callerId, out _);
             if (removed)
             {
                 logger.LogInformation($"Call disconnected - removed CallConnectionId for caller: {callerId}");

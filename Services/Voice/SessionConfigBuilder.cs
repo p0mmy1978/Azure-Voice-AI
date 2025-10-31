@@ -51,8 +51,9 @@ namespace CallAutomation.AzureAI.VoiceLive.Services.Voice
             _logger.LogWarning("═══════════════════════════════════════════════");
             _logger.LogWarning("🔊 AUDIO ENHANCEMENT CONFIGURATION VERIFICATION");
             _logger.LogWarning("═══════════════════════════════════════════════");
-            _logger.LogWarning("📍 NOISE PROFILE: VERY NOISY OFFICE (MAXIMUM FILTERING)");
-            _logger.LogWarning("⚠️  EXTREMELY AGGRESSIVE - WILL IGNORE MOST BACKGROUND NOISE");
+            _logger.LogWarning("📍 NOISE PROFILE: RADIO/TV FILTERING (ULTRA-MAXIMUM)");
+            _logger.LogWarning("🔥 ULTRA AGGRESSIVE - DESIGNED TO IGNORE RADIO/TV VOICES");
+            _logger.LogWarning("⚠️  Caller must speak CLEARLY and DELIBERATELY");
             _logger.LogWarning("═══════════════════════════════════════════════");
 
             // Serialize to inspect the actual configuration
@@ -63,11 +64,11 @@ namespace CallAutomation.AzureAI.VoiceLive.Services.Voice
             _logger.LogWarning($"✅ Noise Reduction: azure_deep_noise_suppression (MAXIMUM)");
             _logger.LogWarning($"✅ Echo Cancellation: server_echo_cancellation");
             _logger.LogWarning($"✅ VAD Type: azure_semantic_vad");
-            _logger.LogWarning($"🔥 VAD Threshold: 0.75 (75% confidence - MAXIMUM FILTERING)");
+            _logger.LogWarning($"🔥 VAD Threshold: 0.8 (80% confidence - RADIO/TV FILTERING)");
             _logger.LogWarning($"✅ VAD Prefix Padding: 150ms");
-            _logger.LogWarning($"🔥 VAD Silence Duration: 600ms (long pause required)");
-            _logger.LogWarning($"🔥 VAD Min Speech: 400ms (half-second minimum)");
-            _logger.LogWarning($"🔥 VAD Max Silence: 1500ms (very patient)");
+            _logger.LogWarning($"🔥 VAD Silence Duration: 800ms (0.8 second pause required)");
+            _logger.LogWarning($"🔥 VAD Min Speech: 500ms (half-second sustained speech)");
+            _logger.LogWarning($"🔥 VAD Max Silence: 1800ms (nearly 2 seconds patience)");
             _logger.LogWarning($"✅ VAD Remove Filler Words: true");
             _logger.LogWarning($"✅ Audio Format: pcm16 @ 24000Hz");
             _logger.LogWarning($"✅ Voice: en-US-EmmaNeural");
@@ -75,11 +76,11 @@ namespace CallAutomation.AzureAI.VoiceLive.Services.Voice
             _logger.LogWarning("═══════════════════════════════════════════════");
 
             // Original detailed logging (kept for backward compatibility)
-            _logger.LogInformation("Audio Enhancement Settings (VERY NOISY OFFICE - MAXIMUM FILTERING):");
+            _logger.LogInformation("Audio Enhancement Settings (RADIO/TV FILTERING - ULTRA-MAXIMUM):");
             _logger.LogInformation("   Noise Reduction: azure_deep_noise_suppression (MAXIMUM)");
             _logger.LogInformation("   Echo Cancellation: server_echo_cancellation");
-            _logger.LogInformation("   Voice Activity Detection: azure_semantic_vad (threshold: 0.75)");
-            _logger.LogInformation("   Speech Detection: 400ms minimum, 600ms silence, 1500ms max pause");
+            _logger.LogInformation("   Voice Activity Detection: azure_semantic_vad (threshold: 0.8)");
+            _logger.LogInformation("   Speech Detection: 500ms minimum, 800ms silence, 1800ms max pause");
             _logger.LogInformation("   Audio Format: pcm16 @ 24kHz");
 
             return sessionConfig;
@@ -285,42 +286,43 @@ namespace CallAutomation.AzureAI.VoiceLive.Services.Voice
 
         /// <summary>
         /// Build turn detection configuration for voice activity detection
-        /// TUNED FOR VERY NOISY OPEN OFFICE - MAXIMUM FILTERING
+        /// ULTRA-MAXIMUM FILTERING - FOR RADIO/TV BACKGROUND NOISE
         /// </summary>
         private object BuildTurnDetection()
         {
-            // NOISE SUPPRESSION PROFILE: VERY NOISY OPEN OFFICE (MAXIMUM FILTERING)
-            // These settings AGGRESSIVELY filter background conversations
+            // NOISE SUPPRESSION PROFILE: RADIO/TV IN BACKGROUND (ULTRA-MAXIMUM FILTERING)
+            // Specifically tuned to ignore radio voices while capturing caller speech
+            // Radio/TV voices are the hardest to filter because they're human speech!
             return new
             {
                 type = "azure_semantic_vad",
 
-                // THRESHOLD: 0.75 = Require 75% confidence it's actual caller speech
-                // (was 0.6 - still too sensitive for very noisy environments)
-                // This is VERY aggressive - only clear, deliberate speech gets through
-                // 0.6 = Noisy office | 0.7 = Very noisy | 0.75 = MAXIMUM filtering
-                threshold = 0.75,
+                // THRESHOLD: 0.8 = Require 80% confidence it's actual caller speech
+                // (was 0.75 - still confused by radio voices)
+                // This is ULTRA aggressive - designed to distinguish caller from radio
+                // 0.75 = Max filtering | 0.8 = Radio/TV filtering | 0.85 = Extreme (may miss caller)
+                threshold = 0.8,
 
                 // PREFIX PADDING: Keep at 150ms to capture start of speech
                 prefix_padding_ms = 150,
 
-                // SILENCE DURATION: 600ms - LONG pause required before processing
-                // (was 400ms - still triggered on background voices)
-                // Bot waits 0.6 seconds of silence before deciding turn is over
-                silence_duration_ms = 600,
+                // SILENCE DURATION: 800ms - VERY LONG pause required before processing
+                // (was 600ms - radio has quick back-and-forth that confused VAD)
+                // Bot waits 0.8 seconds of silence - radio rarely has this long pause
+                silence_duration_ms = 800,
 
                 // Remove "um", "uh", etc. - keep enabled
                 remove_filler_words = true,
 
-                // MIN SPEECH DURATION: 400ms - Only accept sustained speech
-                // (was 250ms - still picked up background noises)
-                // Requires nearly half a second of continuous speech
-                min_speech_duration_ms = 400,
+                // MIN SPEECH DURATION: 500ms - Only accept sustained, deliberate speech
+                // (was 400ms - radio snippets were triggering bot)
+                // Requires full half-second of continuous speech from caller
+                min_speech_duration_ms = 500,
 
-                // MAX SILENCE: 1500ms - Very patient with caller thinking
-                // (was 1200ms) - Allows longer pauses mid-sentence
-                // Gives caller 1.5 seconds to collect thoughts
-                max_silence_for_turn_ms = 1500
+                // MAX SILENCE: 1800ms - VERY patient with caller thinking
+                // (was 1500ms) - Allows nearly 2 seconds between caller sentences
+                // Gives caller plenty of time without radio interference
+                max_silence_for_turn_ms = 1800
             };
         }
 

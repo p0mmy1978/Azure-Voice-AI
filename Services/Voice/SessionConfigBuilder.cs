@@ -51,9 +51,9 @@ namespace CallAutomation.AzureAI.VoiceLive.Services.Voice
             _logger.LogWarning("═══════════════════════════════════════════════");
             _logger.LogWarning("🔊 AUDIO ENHANCEMENT CONFIGURATION VERIFICATION");
             _logger.LogWarning("═══════════════════════════════════════════════");
-            _logger.LogWarning("📍 NOISE PROFILE: QUIET OFFICE (RESPONSIVE)");
-            _logger.LogWarning("✨ NORMAL SENSITIVITY - PICKS UP NATURAL SPEECH");
-            _logger.LogWarning("✅  Caller can speak naturally and conversationally");
+            _logger.LogWarning("📍 NOISE PROFILE: NOISY ENVIRONMENT (TV/TRAFFIC)");
+            _logger.LogWarning("🛡️  HIGH THRESHOLD - FILTERS BACKGROUND NOISE");
+            _logger.LogWarning("✅  Requires clearer speech, prevents false triggers");
             _logger.LogWarning("═══════════════════════════════════════════════");
 
             // Serialize to inspect the actual configuration
@@ -64,11 +64,11 @@ namespace CallAutomation.AzureAI.VoiceLive.Services.Voice
             _logger.LogWarning($"✅ Noise Reduction: azure_deep_noise_suppression (MAXIMUM)");
             _logger.LogWarning($"✅ Echo Cancellation: server_echo_cancellation");
             _logger.LogWarning($"✅ VAD Type: azure_semantic_vad");
-            _logger.LogWarning($"✅ VAD Threshold: 0.5 (50% confidence - QUIET OFFICE)");
-            _logger.LogWarning($"✅ VAD Prefix Padding: 150ms");
-            _logger.LogWarning($"✅ VAD Silence Duration: 400ms (0.4 second pause)");
-            _logger.LogWarning($"✅ VAD Min Speech: 250ms (quarter-second natural speech)");
-            _logger.LogWarning($"✅ VAD Max Silence: 1200ms (about 1 second patience)");
+            _logger.LogWarning($"✅ VAD Threshold: 0.65 (65% confidence - NOISY ENVIRONMENT)");
+            _logger.LogWarning($"✅ VAD Prefix Padding: 180ms");
+            _logger.LogWarning($"✅ VAD Silence Duration: 500ms (0.5 second pause)");
+            _logger.LogWarning($"✅ VAD Min Speech: 400ms (filters brief background sounds)");
+            _logger.LogWarning($"✅ VAD Max Silence: 1500ms (1.5 second patience)");
             _logger.LogWarning($"✅ VAD Remove Filler Words: true");
             _logger.LogWarning($"✅ Audio Format: pcm16 @ 24000Hz");
             _logger.LogWarning($"✅ Voice: en-US-EmmaNeural");
@@ -76,11 +76,11 @@ namespace CallAutomation.AzureAI.VoiceLive.Services.Voice
             _logger.LogWarning("═══════════════════════════════════════════════");
 
             // Original detailed logging (kept for backward compatibility)
-            _logger.LogInformation("Audio Enhancement Settings (QUIET OFFICE - RESPONSIVE):");
+            _logger.LogInformation("Audio Enhancement Settings (NOISY ENVIRONMENT - FILTERS BACKGROUND):");
             _logger.LogInformation("   Noise Reduction: azure_deep_noise_suppression (MAXIMUM)");
             _logger.LogInformation("   Echo Cancellation: server_echo_cancellation");
-            _logger.LogInformation("   Voice Activity Detection: azure_semantic_vad (threshold: 0.5)");
-            _logger.LogInformation("   Speech Detection: 250ms minimum, 400ms silence, 1200ms max pause");
+            _logger.LogInformation("   Voice Activity Detection: azure_semantic_vad (threshold: 0.65)");
+            _logger.LogInformation("   Speech Detection: 400ms minimum, 500ms silence, 1500ms max pause");
             _logger.LogInformation("   Audio Format: pcm16 @ 24kHz");
 
             return sessionConfig;
@@ -286,39 +286,40 @@ namespace CallAutomation.AzureAI.VoiceLive.Services.Voice
 
         /// <summary>
         /// Build turn detection configuration for voice activity detection
-        /// QUIET OFFICE PROFILE - RESPONSIVE AND NATURAL
+        /// NOISY ENVIRONMENT PROFILE - FILTERS BACKGROUND NOISE
         /// </summary>
         private object BuildTurnDetection()
         {
-            // NOISE SUPPRESSION PROFILE: QUIET OFFICE (RESPONSIVE)
-            // Tuned for normal office environment with minimal background noise
-            // More responsive and natural than RADIO_TV profile
+            // NOISE SUPPRESSION PROFILE: NOISY ENVIRONMENT (TV, TRAFFIC, ETC)
+            // Tuned for environments with background noise (TV, radio, traffic)
+            // Higher threshold prevents false triggers from background audio
             return new
             {
                 type = "azure_semantic_vad",
 
-                // THRESHOLD: 0.5 = Normal responsiveness for quiet environments
-                // Lower = more sensitive, picks up normal speech easily
-                // 0.5 is balanced for quiet office with minimal false triggers
-                threshold = 0.5,
+                // THRESHOLD: 0.65 = Higher confidence required to detect speech
+                // Prevents TV, radio, and background conversations from triggering
+                // Requires clearer, more deliberate speech from caller
+                threshold = 0.65,
 
-                // PREFIX PADDING: Keep at 150ms to capture start of speech
-                prefix_padding_ms = 150,
+                // PREFIX PADDING: 180ms to capture start of speech
+                // Slightly longer to ensure we don't miss speech start
+                prefix_padding_ms = 180,
 
-                // SILENCE DURATION: 400ms - Normal pause for processing
-                // Faster response time for quiet environment
-                silence_duration_ms = 400,
+                // SILENCE DURATION: 500ms - Balanced pause for processing
+                // Not too fast, allows natural speech rhythm
+                silence_duration_ms = 500,
 
                 // Remove "um", "uh", etc. - keep enabled
                 remove_filler_words = true,
 
-                // MIN SPEECH DURATION: 250ms - Natural speech cadence
-                // Quarter-second is normal for words in conversation
-                min_speech_duration_ms = 250,
+                // MIN SPEECH DURATION: 400ms - Filter out brief background sounds
+                // Requires sustained speech, filters TV sound effects and brief noises
+                min_speech_duration_ms = 400,
 
-                // MAX SILENCE: 1200ms - Normal patience with caller thinking
-                // About 1 second between sentences - natural flow
-                max_silence_for_turn_ms = 1200
+                // MAX SILENCE: 1500ms - Patient with caller thinking
+                // About 1.5 seconds between sentences - allows natural pauses
+                max_silence_for_turn_ms = 1500
             };
         }
 
@@ -528,7 +529,7 @@ namespace CallAutomation.AzureAI.VoiceLive.Services.Voice
             var farewell = TimeOfDayHelper.GetFarewell();
             var timeOfDay = TimeOfDayHelper.GetTimeOfDay();
 
-            return $"Voice: en-US-EmmaNeural | VAD: azure_semantic_vad | Security: Enhanced (Name + Department Verification with 1 Retry) | Audio: pcm16@24kHz | Time: {timeOfDay} | Greeting: '{greeting}' | Farewell: '{farewell}'";
+            return $"Voice: en-US-EmmaNeural | VAD: azure_semantic_vad (0.65 threshold - NOISY ENV) | Security: Enhanced (Name + Department Verification with 1 Retry) | Audio: pcm16@24kHz | Time: {timeOfDay} | Greeting: '{greeting}' | Farewell: '{farewell}'";
         }
     }
 }

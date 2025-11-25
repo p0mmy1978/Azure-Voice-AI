@@ -10,4 +10,5 @@ obj/
 .env
 *.log
 appsettings*.json
+!appsettings.example.json
 logs/
